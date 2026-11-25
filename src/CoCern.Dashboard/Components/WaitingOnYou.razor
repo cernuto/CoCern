@@ -77,18 +77,23 @@
     [Parameter] public EventCallback OnOpenStanding { get; set; }
 
     private DashboardHumanAnswer? pending;
-    private DashboardHumanAnswer? recorded;
+    // Answers recorded from this page, by task and blocker, with the task version each one produced. The list catches up within seconds;
+    // until then these keep an answered decision answered and let a further decision on that task use the version it now has.
+    private readonly Dictionary<(string Repository, string Board, string Task, string Blocker), (string Option, long Version)> recorded = new();
     private bool sending;
     private string answerStatus = "";
 
     private string? RecordedOption(DashboardWaitingItem item, DashboardHumanDecision decision) =>
-        recorded is { } result && result.RepositoryId == item.RepositoryId && result.BoardId == item.BoardId && result.TaskId == item.TaskId
-        && result.TaskVersion == item.TaskVersion && result.BlockerId == decision.BlockerId ? result.Option : null;
+        recorded.TryGetValue((item.RepositoryId, item.BoardId, item.TaskId, decision.BlockerId), out var answer) && item.TaskVersion <= answer.Version ? answer.Option : null;
+
+    private long CurrentVersion(DashboardWaitingItem item) => recorded
+        .Where(entry => entry.Key.Repository == item.RepositoryId && entry.Key.Board == item.BoardId && entry.Key.Task == item.TaskId)
+        .Select(entry => entry.Value.Version).Append(item.TaskVersion).Max();
 
     private async Task AnswerAsync(DashboardWaitingItem item, DashboardHumanDecision decision, string option)
     {
         if (sending) return;
-        var request = new DashboardHumanAnswer(item.RepositoryId, item.BoardId, item.TaskId, item.TaskVersion, decision.BlockerId, option, "");
+        var request = new DashboardHumanAnswer(item.RepositoryId, item.BoardId, item.TaskId, CurrentVersion(item), decision.BlockerId, option, "", item.SessionId);
         if (pending is null || pending with { RequestId = "" } != request)
             pending = request with { RequestId = Guid.NewGuid().ToString("N") };
         sending = true;
@@ -100,10 +105,19 @@
                 return;
             }
             using var response = await http.PostAsJsonAsync("api/waiting/answer", pending);
-            if (response.StatusCode == System.Net.HttpStatusCode.OK) recorded = pending;
+            DashboardHumanAnswerResult? result = null;
+            if (response.StatusCode is System.Net.HttpStatusCode.OK or System.Net.HttpStatusCode.Conflict)
+            {
+                try { result = await response.Content.ReadFromJsonAsync<DashboardHumanAnswerResult>(); }
+                catch (Exception error) when (error is System.Text.Json.JsonException or NotSupportedException) { }
+            }
+            if (response.StatusCode == System.Net.HttpStatusCode.OK)
+                recorded[(item.RepositoryId, item.BoardId, item.TaskId, decision.BlockerId)] = (option, result?.TaskVersion ?? pending.TaskVersion + 1);
             answerStatus = response.StatusCode switch
             {
                 System.Net.HttpStatusCode.OK => $"Recorded the answer for {item.TaskId} and queued it for the owning chat.",
+                System.Net.HttpStatusCode.Conflict when result?.Code == CoCern.Contracts.RelayErrorCodes.SessionUnknown =>
+                    $"The chat that owns {item.TaskId} has closed, so the answer was not recorded. Give the task to an open chat, then answer.",
                 System.Net.HttpStatusCode.Conflict => "The task changed. Review the current question before answering.",
                 System.Net.HttpStatusCode.Forbidden or System.Net.HttpStatusCode.Unauthorized => "Sign in again to answer.",
                 _ => "The answer could not be confirmed. Check the task before retrying."

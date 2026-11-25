@@ -187,7 +187,7 @@ internal static class NativeJoinHook
                     }
                     return 0;
                 case "Stop" when provider == "claude":
-                    return await StopHook.RunNativeAsync(new StringReader(text), error, join, ct, ownerGone: OwningProcess.WaitUntilGoneAsync);
+                    return await StopHook.RunNativeAsync(new StringReader(text), error, join, ct, ownerGone: OwningProcess.WaitUntilGoneAsync, reportTurn: true);
                 case "PreToolUse":
                     var name = ChatLocators.Text(root, "tool_name");
                     if (edit) return await NativeEditHook.RunAsync(join, capture, root, error, ct);

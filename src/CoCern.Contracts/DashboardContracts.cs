@@ -124,8 +124,10 @@ public sealed record DashboardWaitingItem
 }
 
 public sealed record DashboardHumanDecision(string BlockerId, string Question, string RecheckCondition, string[] Options, string RecommendedOption, string? Answer);
-public sealed record DashboardHumanAnswer(string RepositoryId, string BoardId, string TaskId, long TaskVersion, string BlockerId, string Option, string RequestId);
-public sealed record DashboardHumanAnswerResult(bool Ok, string Code);
+/// <param name="SessionId">The owning chat the viewer saw. The answer is refused when that chat has closed or no longer owns the task.</param>
+public sealed record DashboardHumanAnswer(string RepositoryId, string BoardId, string TaskId, long TaskVersion, string BlockerId, string Option, string RequestId, string SessionId = "");
+/// <param name="TaskVersion">The task's version after a recorded answer, so a further answer on that task need not wait for the next list.</param>
+public sealed record DashboardHumanAnswerResult(bool Ok, string Code, long? TaskVersion = null);
 
 public sealed record DashboardDocCache
 {

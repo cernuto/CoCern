@@ -26,9 +26,37 @@ public static class ClaudeWaiter
     /// re-arming is one command instead of an acknowledgment call plus the re-arm. A failed acknowledgment is reported and the wait goes on.
     /// </remarks>
     public static Task<string> RunAsync(string nodeFolder, string claudeSessionId, Action<string> deliver, TimeSpan? timeout, CancellationToken cancellationToken, bool printInbox = false, IReadOnlyList<string>? acknowledge = null) =>
-        RunAsync(nodeFolder, claudeSessionId, deliver, timeout, cancellationToken, null, null, printInbox: printInbox, acknowledge: acknowledge);
+        RunAsync(nodeFolder, claudeSessionId, deliver, timeout, cancellationToken, null, null, printInbox: printInbox, acknowledge: acknowledge, reportTurn: true);
 
-    internal static async Task<string> RunAsync(string nodeFolder, string claudeSessionId, Action<string> deliver, TimeSpan? timeout, CancellationToken cancellationToken, HttpMessageHandler? handler, Func<HttpMessageHandler>? hubHandler, TimeProvider? clock = null, bool printInbox = false, IReadOnlyList<string>? acknowledge = null, TimeSpan? interval = null, string origin = CallOrigins.ClaudeWaiter)
+    /// <param name="reportTurn">Tell the hub the chat is working once a wake is delivered (<see cref="ReportWorkingAsync"/>).</param>
+    internal static async Task<string> RunAsync(string nodeFolder, string claudeSessionId, Action<string> deliver, TimeSpan? timeout, CancellationToken cancellationToken, HttpMessageHandler? handler, Func<HttpMessageHandler>? hubHandler, TimeProvider? clock = null, bool printInbox = false, IReadOnlyList<string>? acknowledge = null, TimeSpan? interval = null, string origin = CallOrigins.ClaudeWaiter, bool reportTurn = false)
+    {
+        var waited = await WaitForWakeAsync(nodeFolder, claudeSessionId, deliver, timeout, cancellationToken, handler, hubHandler, clock, printInbox, acknowledge, interval, origin);
+        if (reportTurn && waited == "queued")
+        {
+            var connection = Path.GetFullPath(nodeFolder);
+            await ReportWorkingAsync(ConnectionOptions(connection), FindHandle(connection, Normalize(claudeSessionId)), handler, origin, clock);
+        }
+        return waited;
+    }
+
+    /// <summary>
+    /// A delivered wake starts a turn that no <c>UserPromptSubmit</c> hook sees, so the waiter that delivered it reports the chat as working
+    /// (the observation <see cref="TurnHook"/> sends for a typed prompt). The turn's own <c>Stop</c> hook reports its end. Best effort and
+    /// held to the hook timeout: a failure leaves the last observation to age out and never cancels the wake.
+    /// </summary>
+    private static async Task ReportWorkingAsync(AdapterOptions? options, SessionHandle? handle, HttpMessageHandler? handler, string origin, TimeProvider? clock)
+    {
+        if (options is null || handle is null) return;
+        try
+        {
+            using var limit = new CancellationTokenSource(PromptHook.Timeout(Environment.GetEnvironmentVariable("COCERN_HOOK_TIMEOUT_MS")));
+            await CallAsHandleAsync(options, handle, handler, CoCern.Contracts.RelayTools.Ack, TurnHook.Observation("working", (clock ?? TimeProvider.System).GetUtcNow()), origin, limit.Token);
+        }
+        catch (Exception) { /* The wake is already delivered; an unreported turn only reads as unknown later. */ }
+    }
+
+    private static async Task<string> WaitForWakeAsync(string nodeFolder, string claudeSessionId, Action<string> deliver, TimeSpan? timeout, CancellationToken cancellationToken, HttpMessageHandler? handler, Func<HttpMessageHandler>? hubHandler, TimeProvider? clock, bool printInbox, IReadOnlyList<string>? acknowledge, TimeSpan? interval, string origin)
     {
         // Before --ack, which normalizes the ID, so a bad --chat gets the usage error rather than a FormatException.
         if (!ChatLocators.IsUuid(claudeSessionId)) throw new AdapterConfigurationException(ChatUsage);
@@ -237,7 +265,7 @@ public static class ClaudeWaiter
 
     // Task 4's verified Claude hook supplies the root/parent and checkout. This path never asks the ID-only legacy finder.
     internal static async Task<string> RunNativeAsync(NativeJoin join, NativeHookContext capture, Action<string> deliver, TimeSpan? timeout, CancellationToken ct, HttpMessageHandler? handler = null,
-        bool printInbox = false, TimeProvider? clock = null, Func<HttpMessageHandler>? hubHandler = null, TimeSpan? interval = null, string origin = CallOrigins.ClaudeWaiter)
+        bool printInbox = false, TimeProvider? clock = null, Func<HttpMessageHandler>? hubHandler = null, TimeSpan? interval = null, string origin = CallOrigins.ClaudeWaiter, bool reportTurn = false)
     {
         if (capture.Provider != ChatProviders.Claude) throw new AdapterConfigurationException(ChatUsage);
         var handle = await join.EnsureAsync(capture, ct);
@@ -256,7 +284,9 @@ public static class ClaudeWaiter
                     new WakeSession(handle.SessionId, handle.SessionToken), NativeJoinBinding.ForDispatch(join.PrivateFolder, handle, new InboxWaitDispatcher(queued)))]);
         }
         Func<WakeState, Task<bool>>? onQueued = printInbox ? state => DeliverPrintedAsync(prompt!, state, handle, join.WakeOptions, handler, deliver, origin, ct) : null;
-        return await WaitForHandleAsync(join.PrivateFolder, chat.ThreadId, join.WakeOptions, Targets, timeout, ct, handler, hubHandler, clock, interval, origin, onQueued);
+        var waited = await WaitForHandleAsync(join.PrivateFolder, chat.ThreadId, join.WakeOptions, Targets, timeout, ct, handler, hubHandler, clock, interval, origin, onQueued);
+        if (reportTurn && waited == "queued") await ReportWorkingAsync(join.WakeOptions, handle, handler, origin, clock);
+        return waited;
     }
 
     private static async Task<string> WaitAsync(string nodeFolder, string claudeSessionId, Action<string> deliver, TimeSpan? timeout, CancellationToken cancellationToken, HttpMessageHandler? handler, Func<HttpMessageHandler>? hubHandler, TimeProvider? clock, TimeSpan? interval, string origin, Func<WakeState, Task<bool>>? onQueued = null)

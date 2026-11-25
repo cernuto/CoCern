@@ -581,8 +581,10 @@ internal static class TaskBoardAggregate
         var blocker = new WorkflowBlocker(question);
         var since = Date(task.Json, BoardTask.HumanSinceKey);
         if (since == default) since = task.UpdatedAt;
+        // The dashboard names the owner it checked was open. A task that changed hands since needs a fresh look.
         if (since <= context.Now.AddDays(-RelayLimits.WaitingBlockerDays) || !blocker.Options.Contains(option, StringComparer.Ordinal)
-            || task.Owner.Length == 0 || task.Json[BoardTask.HumanAnswersKey]?[id] is not null) return VersionConflict(task.Version);
+            || task.Owner.Length == 0 || Text(context.Args, "expectedOwner") is { Length: > 0 } expected && task.Owner != expected
+            || task.Json[BoardTask.HumanAnswersKey]?[id] is not null) return VersionConflict(task.Version);
         if (task.Messages.Count >= MaxConversation) return Error(CapacityExceeded);
         var version = task.Version + 1;
         var text = $"Dashboard answer to {id} ({blocker.Summary}): {option}";

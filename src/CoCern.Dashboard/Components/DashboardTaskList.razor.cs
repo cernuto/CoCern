@@ -77,6 +77,8 @@ public partial class DashboardTaskList : ComponentBase, IAsyncDisposable
                     });
                     hub.Closed += _ => InvokeAsync(() =>
                     {
+                        // An expanded task must not keep calling a connection that has ended.
+                        if (ReferenceEquals(connection, hub)) connection = null;
                         changes.Writer.TryComplete();
                         if (token.IsCancellationRequested) return;
                         notice = "Board connection interrupted. Reconnecting…";
@@ -126,6 +128,8 @@ public partial class DashboardTaskList : ComponentBase, IAsyncDisposable
                         revision = 0;
                     }
                 }
+                // The connection of this pass is disposed by now, however the pass ended.
+                connection = null;
                 token.ThrowIfCancellationRequested();
                 notice = "Board unavailable. Check the repository and board. Retrying automatically…";
                 StateHasChanged();

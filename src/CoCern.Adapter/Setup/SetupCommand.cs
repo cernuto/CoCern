@@ -244,7 +244,8 @@ internal static class SetupCommand
             // The Stop hook is on by default: it is how an idle Claude Code chat wakes for a message (Codex chats are woken by the node instead).
             // The prompt hook is opt-in: a status line and new mail with each human message, at no tool call for the model. The same opt-in adds Claude Code's post-tool hook, which
             // brings new mail during a turn, and its waiting hooks, which report a chat stopped at a client prompt on "Waiting on you". They stay off by default until they have been tried on a
-            // real client, and Codex's file gets neither. All go into Claude Code's settings.json in one plan, so no write loses another.
+            // real client, and Codex's file gets only the prompt hook of these. All go into Claude Code's settings.json in one plan, so no write loses another.
+            // The turn hooks are on by default for both clients: they run in the background, report only a turn's phase and time, and never hold up a prompt.
             string Hook(string flag) => $"{SetupEnvironment.AdapterCommandLine(env.DotnetPath, env.AdapterDll)} {flag}" + (options.DataDir is null ? "" : $" --data-dir {LogonStart.Quote(folder)}");
             var promptHook = options.PromptHook ? Hook("--prompt-hook") : null;
             var postToolHook = options.PromptHook ? Hook("--post-tool-hook") : null;

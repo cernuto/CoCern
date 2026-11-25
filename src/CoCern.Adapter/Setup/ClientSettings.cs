@@ -651,11 +651,16 @@ internal static class ClientSettings
         return PlanHooks(path, specs.ToArray());
     }
 
+    /// <summary>
+    /// The turn observation hooks. They sit in the user's own settings, so they run for every chat on this PC, joined or not. Each is
+    /// <c>async</c>, which both clients' hook references document for command hooks: the client goes on at once and a prompt never waits
+    /// for the adapter to start. The hook stamps its observation when it starts, so the hub still orders a turn's events correctly.
+    /// </summary>
     private static IEnumerable<HookSpec> TurnHooks(string command, bool codex)
     {
         string[] events = codex ? ["UserPromptSubmit", "Stop", "Interrupt"] : ["UserPromptSubmit", "Stop"];
         foreach (var name in events)
-            yield return new(name, "--turn-hook", new JsonObject { ["type"] = "command", ["command"] = command, ["timeout"] = WaitingHookTimeoutSeconds },
+            yield return new(name, "--turn-hook", new JsonObject { ["type"] = "command", ["command"] = command, ["async"] = true, ["timeout"] = WaitingHookTimeoutSeconds },
                 ReplaceOwned: true, AdapterOnly: true);
     }
 

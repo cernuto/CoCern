@@ -53,6 +53,10 @@ public sealed class WaitingOnYouTests
         var stale = args.DeepClone().AsObject();
         stale["expectedVersion"] = claim.Version;
         Assert.Equal(RelayErrorCodes.VersionConflict, hub.Board(Operations.AnswerHumanBlocker, stale, T0, viewer).Code);
+        // The dashboard names the owner it checked was open; a task that changed hands records nothing.
+        var moved = args.DeepClone().AsObject();
+        moved["expectedOwner"] = "another-session";
+        Assert.Equal(RelayErrorCodes.VersionConflict, hub.Board(Operations.AnswerHumanBlocker, moved, T0, viewer).Code);
         var result = hub.Board(Operations.AnswerHumanBlocker, args, T0, viewer);
         Assert.True(result.Ok, result.Code);
         Assert.Equal(result.DataJson, hub.Board(Operations.AnswerHumanBlocker, args, T0, viewer).DataJson);

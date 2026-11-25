@@ -59,13 +59,15 @@ internal static class TaskDashboardSummary
             milestone = $"{String(latest["actionId"])} · {String(latest["outcome"])}";
         var reviewReport = reports?.LastOrDefault(report => report["review"] is JsonObject && report["historical"]?.GetValue<bool>() != true);
         var review = reviewReport?["review"]?.DeepClone().AsObject();
-        if (review is not null) review["reviewer"] = reviewReport!["sessionId"]?.DeepClone() ?? reviewReport["author"]?.DeepClone();
+        // A dashboard answer has no session, and stores an empty one: its author is who made the update.
+        static string? Actor(JsonObject? entry) => String(entry?["sessionId"]) is { Length: > 0 } session ? session : String(entry?["author"]) is { Length: > 0 } author ? author : null;
+        if (review is not null) review["reviewer"] = Actor(reviewReport);
         return new JsonObject
         {
             ["taskId"] = task.TaskId, ["version"] = task.Version, ["owner"] = task.Json["owner"]?.DeepClone(),
             ["leaseUntil"] = task.Json["leaseUntil"]?.DeepClone(), ["pendingActions"] = TaskActions.HasUnresolved(task),
             ["state"] = workflow?.State, ["title"] = Clip(String(task.FactsIfAny?["title"]) ?? workflow?.Packet?.Goal, 256),
-            ["milestone"] = Clip(milestone, 320), ["updatedBy"] = latest?["sessionId"]?.DeepClone() ?? latest?["author"]?.DeepClone() ?? task.Json["updatedBy"]?.DeepClone(),
+            ["milestone"] = Clip(milestone, 320), ["updatedBy"] = Actor(latest) ?? String(task.Json["updatedBy"]),
             ["updatedAt"] = latest?["at"]?.DeepClone() ?? task.Json["updatedAt"]?.DeepClone(), ["blockerKind"] = blocker?["kind"]?.DeepClone(),
             ["blocker"] = Clip(String(blocker?["summary"]), 320), ["target"] = workflow?.TargetSessionId,
             ["parentTaskId"] = ParentOf(board, task), ["review"] = review

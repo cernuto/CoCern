@@ -5,6 +5,12 @@ namespace CoCern.Adapter.Node;
 
 internal static class TurnHook
 {
+    /// <summary>The arguments of one observation, less the session's own: a dedicated <c>ack</c> that acknowledges nothing.</summary>
+    internal static System.Text.Json.Nodes.JsonObject Observation(string phase, DateTimeOffset at) => new()
+    {
+        ["requestId"] = "turn-hook-" + Guid.NewGuid().ToString("N"), ["turnPhase"] = phase, ["turnObservedAt"] = at.ToString("O")
+    };
+
     public static async Task<int> RunAsync(TextReader input, string nodeFolder, string provider, bool local)
     {
         var at = DateTimeOffset.UtcNow;
