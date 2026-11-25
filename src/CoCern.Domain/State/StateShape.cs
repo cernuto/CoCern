@@ -88,5 +88,5 @@ public static class CommonState
     /// were sent (<see cref="ReadModels.RequestsKey"/>, <see cref="ReadModels.RequestTombstonesKey"/>).
     /// </summary>
     public static StateShape Shape { get; } = StateShape.Object(
-        (RepositoryIdKey, null), (ReadModels.RequestsKey, StateShape.Any), (ReadModels.RequestTombstonesKey, StateShape.Any));
+        (RepositoryIdKey, null), (ReadModels.RequestsKey, StateShape.Any), (ReadModels.RequestTombstonesKey, StateShape.Any), ("retentionCheckedAt", null));
 }
