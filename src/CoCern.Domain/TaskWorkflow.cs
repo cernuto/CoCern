@@ -1,7 +1,9 @@
+using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using CoCern.Contracts;
+using CoCern.Contracts.Dashboard;
 using CoCern.Domain.Messages;
 using CoCern.Domain.State;
 using static CoCern.Contracts.RelayErrorCodes;
@@ -41,6 +43,7 @@ internal static class TaskWorkflow
     {
         if (!AllowsExecution(task, session)) return NotReady(task);
         if (task.Workflow is not { } workflow) return null;
+        if (!ReviewEligible(task, workflow, session, participant)) return Error(WorkflowNotReady, new { reason = "independent reviewer required" }, task.Version);
         if (UnfinishedDependencies(board, workflow) is { Length: > 0 } unfinished) return Error(DependenciesIncomplete, new { dependsOn = unfinished }, task.Version);
         if (GoalAuthority.Problem(board, workflow, participant, session, now) is { } goalProblem) return Error(GrantInvalid, new { authorityRef = workflow.Packet?.AuthorityRef, reason = goalProblem }, task.Version);
         return GrantRefusal(board, workflow, now) is { } refusal ? refusal with { Version = task.Version } : null;
@@ -96,6 +99,9 @@ internal static class TaskWorkflow
             || workflow[WorkflowRecord.BlockersKey] is not JsonArray blockers) return InvalidWorkflow;
         static bool Value(JsonObject obj, string key, int max) => obj[key] is JsonValue value && value.TryGetValue<string>(out var text) && !string.IsNullOrWhiteSpace(text) && text.Length <= max;
         if (PacketFields.Any(key => !Value(packet, key, MaxTextLength))) return InvalidWorkflow;
+        if (workflow[WorkflowRecord.ReviewAuthorClientKey] is { } client &&
+            (client is not JsonValue value || !value.TryGetValue<string>(out var author) || author is not ("codex" or "claude"))) return InvalidWorkflow;
+        if (prior?.ReviewAuthorClient is { Length: > 0 } original && Text(workflow, WorkflowRecord.ReviewAuthorClientKey) != original) return InvalidWorkflow;
         if (!Identifiers(workflow, WorkflowRecord.DependsOnKey, RelayLimits.MaxDependencies) || !Identifiers(packet, WorkflowPacket.ResourcesKey, RelayLimits.MaxClaimResources)) return InvalidWorkflow;
         if (criteria.Count is < 1 or > MaxCriteria || blockers.Count > MaxBlockers
             || workflow[WorkflowRecord.TargetSessionIdKey] is not null && !Value(workflow, WorkflowRecord.TargetSessionIdKey, 256)) return InvalidWorkflow;
@@ -115,12 +121,29 @@ internal static class TaskWorkflow
         {
             if (item is not JsonObject blocker || !Value(blocker, WorkflowBlocker.IdKey, MaxItemIdLength) || !ids.Add(Text(blocker, WorkflowBlocker.IdKey))
                 || !Value(blocker, WorkflowBlocker.SummaryKey, MaxTextLength) || !Value(blocker, WorkflowBlocker.RecheckConditionKey, MaxTextLength)
-                || !BlockerKinds.All.Contains(Text(blocker, WorkflowBlocker.KindKey))) return InvalidWorkflow;
+                || !BlockerKinds.All.Contains(Text(blocker, WorkflowBlocker.KindKey)) || !ValidDecisionOptions(blocker)) return InvalidWorkflow;
         }
         if (state == "blocked" && blockers.Count == 0 || state != "blocked" && blockers.Count != 0) return InvalidWorkflow;
         if (state == "ready" && prior?.State == "blocked" && !Value(workflow, WorkflowRecord.RecheckEvidenceRefKey, MaxTextLength)) return WorkflowRecheckRequired;
         if (state == "completed" && (unresolved || criteria.Any(x => new WorkflowCriterion(x!.AsObject()).Result != "passed"))) return WorkflowIncomplete;
         return null;
+    }
+
+    internal static bool ValidDecisionOptions(JsonObject blocker)
+    {
+        if (blocker[WorkflowBlocker.OptionsKey] is null) return blocker[WorkflowBlocker.RecommendedOptionKey] is null;
+        var decision = new WorkflowBlocker(blocker);
+        if (decision.Kind != BlockerKinds.HumanDecision || blocker[WorkflowBlocker.OptionsKey] is not JsonArray { Count: >= 2 and <= 6 } options) return false;
+        if (decision.Summary != DashboardText.Safe(decision.Summary) || decision.Id != DashboardText.Safe(decision.Id)
+            || decision.RecheckCondition != DashboardText.Safe(decision.RecheckCondition)) return false;
+        if (blocker[WorkflowBlocker.RecommendedOptionKey] is not JsonValue recommendation || !recommendation.TryGetValue<string>(out var recommended)) return false;
+        var labels = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var option in options)
+        {
+            if (option is not JsonValue value || !value.TryGetValue<string>(out var label) || string.IsNullOrWhiteSpace(label)
+                || label.Length > 100 || label != label.Trim() || label != DashboardText.Safe(label) || !labels.Add(label)) return false;
+        }
+        return labels.Contains(recommended);
     }
 
     /// <summary>An optional list of at most <paramref name="maximum"/> distinct, nonempty identifiers.</summary>
@@ -221,6 +244,8 @@ internal static class TaskWorkflow
         if (task.Workflow is not { } workflow) return "has no workflow";
         if (workflow.Blockers.Any(blocker => blocker.Kind == AttentionWeights.ProviderRejection)) return "has a provider_rejection blocker";
         if (workflow.State != "ready") return "is " + workflow.State;
+        if (workflow.ReviewAuthorClient.Length > 0 && (!TargetsSession(workflow, session)
+            || !deferGoal && !ReviewEligible(task, workflow, session, participant))) return "requires a different reviewer";
         if (Validate(workflow.Json, null, TaskActions.HasUnresolved(task)) is not null) return "has an invalid workflow";
         if (TaskActions.HasUnresolved(task)) return "has an unresolved action";
         if (task.Owner is { Length: > 0 } owner && owner != session && task.LeaseUntil > now) return "is claimed by another session";
@@ -230,12 +255,21 @@ internal static class TaskWorkflow
         return null;
     }
 
+    internal static bool ReviewEligible(BoardTask task, WorkflowRecord workflow, string session, VerifiedNativeParticipant? participant) =>
+        workflow.ReviewAuthorClient.Length == 0 || participant is { Client: "codex" or "claude" }
+        && participant.SessionId == session && participant.Client != workflow.ReviewAuthorClient
+        && Text(task.Json, BoardTask.LastReviewChatKey) != ReviewChatKey(task, participant);
+
+    internal static string ReviewChatKey(BoardTask task, VerifiedNativeParticipant reviewer) =>
+        Convert.ToHexString(SHA256.HashData(JsonSerializer.SerializeToUtf8Bytes(new[] { reviewer.RepositoryId, task.TaskId, reviewer.ParticipantId })));
+
     private static bool IsOfferable(BoardState board, BoardTask task, string session, DateTimeOffset now, VerifiedNativeParticipant? participant) =>
         task.Workflow is { } workflow
         && workflow.State == "ready"
         && Validate(workflow.Json, null, TaskActions.HasUnresolved(task)) is null
         && !TaskActions.HasUnresolved(task)
         && TargetsSession(workflow, session)
+        && ReviewEligible(task, workflow, session, participant)
         && (task.Owner.Length == 0 || task.Owner == session || task.LeaseUntil <= now)
         && DependenciesDone(board, workflow)
         && StandingPreferences.GrantProblem(board, workflow, now) is null

@@ -10,6 +10,7 @@
                     <span class="status-dot @(session.Reachable ? "teal" : "amber")" aria-hidden="true"></span>
                     <span class="session-row-label"><strong>@(string.IsNullOrWhiteSpace(session.Label) ? "Unnamed session" : session.Label)</strong><span>@session.Provider on @DashboardFormat.Machine(session)</span><span title="@session.SessionId">#@ShortId(session.SessionId)</span></span>
                     <span class="session-row-state">
+                        <small title="@DashboardFormat.Timestamp(session.TurnObservedAt)">@session.TurnLabel(Now)</small>
                         <BbBadge Class="session-route-badge" Variant="@(session.Reachable ? BadgeVariant.SoftInfo : BadgeVariant.Outline)" title="A direct route lets the hub wake this chat. Its availability does not indicate whether a model is running; MCP calls and inbox communication can work without it.">@(session.Reachable ? "Direct route available" : "No direct route")</BbBadge>
                         <small title="Most recent recorded successful tool call, including background polling. This does not indicate whether a model is running.">Last relay call: @DashboardFormat.Ago(session.LastActivityAt, Now)</small>
                     </span>

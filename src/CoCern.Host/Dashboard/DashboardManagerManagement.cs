@@ -81,6 +81,25 @@ public static class DashboardManagerManagement
         return Project(reply);
     }
 
+    internal static async Task<IResult> AnswerHumanBlockerAsync(HttpContext context, IGrainFactory grains, RepositoryCatalog repositories)
+    {
+        if (Viewer(context) is not { } principal || !DashboardSecurity.SameOrigin(context)) return Results.StatusCode(403);
+        var (body, failure) = await BodyAsync<DashboardHumanAnswer>(context);
+        if (failure is not null) return failure;
+        if (body is null || !Identity(body.RepositoryId) || !Identity(body.BoardId) || !Identity(body.TaskId) || !Identity(body.BlockerId)
+            || !Identity(body.Option) || body.TaskVersion < 1 || !Guid.TryParseExact(body.RequestId, "N", out _))
+            return Results.BadRequest(new DashboardHumanAnswerResult(false, RelayErrorCodes.InvalidArguments));
+        if (repositories.Find(body.RepositoryId) is not { } repository) return Results.StatusCode(403);
+        var args = new JsonObject
+        {
+            ["repositoryId"] = repository, ["boardId"] = body.BoardId, ["taskId"] = body.TaskId, ["expectedVersion"] = body.TaskVersion,
+            ["blockerId"] = body.BlockerId, ["option"] = body.Option, ["requestId"] = body.RequestId
+        };
+        var board = grains.GetGrain<ITaskBoardGrain>(AggregateKinds.BoardKey(repository, body.BoardId));
+        var reply = await board.ExecuteAsync(new RelayCaller(principal, true, [repository], IsInternal: true), Operations.AnswerHumanBlocker, args.ToJsonString());
+        return Results.Json(new DashboardHumanAnswerResult(reply.Ok, reply.Code), statusCode: ToolResults.Status(reply));
+    }
+
     private static string? Viewer(HttpContext context) => DashboardSecurity.SecureTransport(context) && context.User.Identity?.IsAuthenticated == true
         && context.User.FindFirstValue(ClaimTypes.NameIdentifier) is { Length: > 0 } principal ? principal : null;
     private static bool UnsafeCharacter(char value) => char.IsControl(value) || value is '\u2028' or '\u2029';

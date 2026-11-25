@@ -28,6 +28,44 @@ public sealed class WaitingOnYouTests
 
     // ---- The report on ack ----
 
+    [Fact]
+    public void Dashboard_choice_requires_the_displayed_version_and_records_one_answer_on_replay()
+    {
+        var hub = new AggregateHub();
+        var chat = Opened(hub);
+        var taskId = "choice";
+        var create = hub.Board(RelayTools.TaskUpdate, new() { ["taskId"] = taskId, ["expectedVersion"] = 0, ["sessionId"] = chat.Id }, T0);
+        Assert.True(create.Ok, create.Code);
+        var claim = hub.Board(RelayTools.TaskClaim, new() { ["taskId"] = taskId, ["expectedVersion"] = create.Version, ["sessionId"] = chat.Id }, T0);
+        Assert.True(claim.Ok, claim.Code);
+        var workflow = JsonNode.Parse("""
+            {"state":"blocked","packet":{"goal":"decide","target":"test","authorityRef":"test","restoration":"none","stopCondition":"answered"},
+            "criteria":[{"id":"choice","description":"answer recorded","result":"not_run"}],
+            "blockers":[{"kind":"human_decision","id":"layout","summary":"Which layout?","recheckCondition":"Resume the layout work","options":["Wide","Narrow"],"recommendedOption":"Wide"}]}
+            """);
+        var blocked = hub.Board(RelayTools.TaskUpdate, new() { ["taskId"] = taskId, ["sessionId"] = chat.Id, ["expectedVersion"] = claim.Version, ["workflow"] = workflow }, T0);
+        Assert.True(blocked.Ok, blocked.Code);
+        var spoof = new JsonObject { ["taskId"] = taskId, ["kind"] = "human_answer", ["text"] = "Narrow", ["sessionId"] = chat.Id };
+        Assert.Equal(RelayErrorCodes.InvalidArguments, hub.Board(RelayTools.SendMessage, spoof, T0).Code);
+        var args = new JsonObject { ["taskId"] = taskId, ["blockerId"] = "layout", ["option"] = "Narrow", ["expectedVersion"] = blocked.Version, ["requestId"] = "viewer-choice" };
+        Assert.Equal(RelayErrorCodes.InternalOnly, hub.Board(Operations.AnswerHumanBlocker, args, T0, AggregateHub.Admin).Code);
+        var viewer = AggregateHub.Admin with { IsInternal = true };
+        var stale = args.DeepClone().AsObject();
+        stale["expectedVersion"] = claim.Version;
+        Assert.Equal(RelayErrorCodes.VersionConflict, hub.Board(Operations.AnswerHumanBlocker, stale, T0, viewer).Code);
+        var result = hub.Board(Operations.AnswerHumanBlocker, args, T0, viewer);
+        Assert.True(result.Ok, result.Code);
+        Assert.Equal(result.DataJson, hub.Board(Operations.AnswerHumanBlocker, args, T0, viewer).DataJson);
+        Assert.Equal(RelayErrorCodes.AdministratorRequired, hub.Board(Operations.AnswerHumanBlocker, args, T0, viewer with { IsAdministrator = false }).Code);
+        var task = new BoardState(hub.State(AggregateKinds.Board, AggregateHub.BoardKey)).Task(taskId)!;
+        Assert.Equal(WorkflowStates.Blocked, task.Workflow!.State);
+        Assert.Equal("Narrow", task.Json[BoardTask.HumanAnswersKey]!["layout"]!.GetValue<string>());
+        var waiting = WaitingList.Blocker(AggregateHub.BoardKey, taskId, chat.Id, null, null, null, task.Workflow.BlockerList!.ToJsonString(), task.Version, task.Json[BoardTask.HumanAnswersKey]!.ToJsonString());
+        Assert.Equal("Narrow", Assert.Single(waiting!.Decisions).Answer);
+        hub.DeliverAll(T0);
+        Assert.Single(hub.Inbox(chat, T0), item => item["kind"]?.ToString() == "human_answer" && item["text"]!.ToString().Contains("Narrow", StringComparison.Ordinal));
+    }
+
     private static RelayReply Ack(AggregateHub hub, Chat chat, JsonNode? waitingFor, DateTimeOffset at, string? requestId = null)
     {
         var args = new JsonObject { ["waitingFor"] = waitingFor };

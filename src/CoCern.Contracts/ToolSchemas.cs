@@ -259,6 +259,7 @@ internal static class ToolSchemas
                 properties["snapshotTag"] = new { type = "string", maxLength = 64, description = "Board-list continuation only; omit with taskId, section or sinceRevision. Restart on ListRestartRequired." };
                 Text("factKey", "Optional selected task fact key."); break;
             case RelayTools.TaskUpdate:
+                properties["parentTaskId"] = new { type = new[] { "string", "null" }, description = "Delegating task on this board; null clears the link." };
                 Object("patch", "Shared task facts; cannot overwrite coordination ownership/version internals.");
                 properties["notes"] = new { description = "Bounded authored task notes, at most 16 KiB with task patch." };
                 Text("message", "Task conversation message committed with this milestone."); Array("actionReports", "Reported action results committed atomically with this milestone.");
@@ -282,6 +283,7 @@ internal static class ToolSchemas
                 Text("inputFingerprint", "Stable identity of this action's intended inputs."); Text("triggerId", "Optional delivery trigger consumed by this action."); Integer("attempt", "Explicit next attempt number after a resolved prior attempt.");
                 properties["requiresRestoration"] = new { type = "boolean" }; properties["explicitRetry"] = new { type = "boolean" }; break;
             case RelayTools.ActionReport:
+                Object("review", "Source review: full commit SHA, branch, conclusion and optional positive pullRequest number. The reporting session identifies the reviewer.");
                 properties["attempt"] = new { type = "integer", minimum = 1, description = "Required attempt returned by action_begin; do not infer a new attempt or replay the action." };
                 properties["outcome"] = new { type = "string", @enum = ActionOutcomes.All.ToArray(), description = "Required for an ordinary report; authorized recover:true or restoration:accepted may omit it." };
                 properties["restoration"] = new { type = "string", @enum = Restorations.Reported.ToArray() };
@@ -512,9 +514,21 @@ internal static class ToolSchemas
                 blockers = new
                 {
                     type = "array", maxItems = 16,
-                    items = new { type = "object", properties = new { id = Text(128, "Unique blocker ID."), kind = new { type = "string", @enum = BlockerKinds.All.ToArray() }, summary = Text(2048, "Current blocking condition."), recheckCondition = Text(2048, "Evidence needed before clearing the blocker.") }, required = new[] { "id", "kind", "summary", "recheckCondition" } }
+                    items = new
+                    {
+                        type = "object",
+                        properties = new
+                        {
+                            id = Text(128, "Unique blocker ID."), kind = new { type = "string", @enum = BlockerKinds.All.ToArray() },
+                            summary = Text(2048, "Current blocking condition."), recheckCondition = Text(2048, "Evidence needed before clearing the blocker."),
+                            options = new { type = "array", minItems = 2, maxItems = 6, uniqueItems = true, items = Text(100, "Plain-text choice."), description = "Optional choices for a human_decision blocker." },
+                            recommendedOption = Text(100, "Exact recommended label when options are supplied.")
+                        },
+                        required = new[] { "id", "kind", "summary", "recheckCondition" }
+                    }
                 },
                 targetSessionId = OptionalText(256, "Optional intended worker session ID; never its private token."),
+                reviewAuthorClient = new { type = new[] { "string", "null" }, @enum = new string?[] { "claude", "codex", null }, description = "For an independent review, the code author's client. A different verified client and a fresh reviewer are required." },
                 priority = new { type = new[] { "integer", "null" }, minimum = -1000, maximum = 1000, description = "Higher is offered first." },
                 recheckEvidenceRef = OptionalText(2048, "Nonempty reference required when explicitly changing blocked to ready."),
                 dependsOn = Identifiers(RelayLimits.MaxDependencies, "Task IDs on this board that must be completed before this task is offered.")

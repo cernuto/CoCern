@@ -135,6 +135,11 @@ try
         using var output = new StreamWriter(Console.OpenStandardOutput(), new System.Text.UTF8Encoding(false)) { AutoFlush = true };
         return await PostToolHook.RunAsync(Console.In, output, folder);
     }
+    if (args.Length >= 2 && args[0] == "--turn-hook" && args[1] is ChatProviders.Claude or ChatProviders.Codex)
+    {
+        var folder = args.Length == 4 && args[2] == "--data-dir" ? args[3] : NodeState.ConfiguredFolder(Environment.GetEnvironmentVariable);
+        return await TurnHook.RunAsync(Console.In, folder, args[1], local: args is [_, _, "--local"]);
+    }
     if (args.Length > 0 && args[0] == "--waiting-hook")
     {
         // Claude Code's Notification, PreToolUse, Stop and PostToolUseFailure hooks for "Waiting on you": no output at all, and always exit 0, so it can never influence a tool call or a turn.

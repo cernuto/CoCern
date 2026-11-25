@@ -486,6 +486,18 @@ internal static class SessionAggregate
     /// </summary>
     private static RelayReply Acknowledge(AggregateContext context, SessionState state)
     {
+        if (context.Args["turnPhase"] is not null)
+        {
+            var phase = Text(context.Args, "turnPhase");
+            var observed = OptionalDate(context.Args, "turnObservedAt");
+            if (context.Args["messageIds"] is not null || context.Args["messageId"] is not null || context.Args["waitingFor"] is not null ||
+                phase is not ("working" or "finished" or "interrupted") || observed is null ||
+                observed > context.Now.AddMinutes(2) || observed < context.Now.AddMinutes(-15))
+                return Error(InvalidArguments, new { field = "turnPhase" });
+            // Dedicated observation call. A hook never changes a waiting report or acknowledges mail.
+            state.ObserveTurn(phase, observed.Value);
+            return Ok(new JsonObject { ["acknowledged"] = 0 });
+        }
         var report = context.Args["waitingFor"];
         if (report is not null && !ValidWaitingFor(report)) return Error(InvalidArguments, new { field = "waitingFor", maxLength = RelayLimits.MaxWaitingTextLength });
         var fromHook = Flag(context.Args, RelayLimits.HookWaitingField);
@@ -557,6 +569,7 @@ internal static class SessionAggregate
 
     public static string MessageText(JsonObject args)
     {
+        if (Text(args, "kind") == InboxMessage.HumanAnswerKind) throw new ArgumentException("Only a dashboard decision can record a human answer.");
         var text = Text(args, "text");
         return text.Length > 0 && Encoding.UTF8.GetByteCount(text) <= RelayLimits.MaxReportBytes ? text : throw new ArgumentException("Message text must contain 1 to 8192 UTF-8 bytes.");
     }

@@ -42,7 +42,8 @@ public sealed partial class SqliteStore
             FROM boards, json_each(boards.document, '$.{BoardState.TasksKey}') AS task
             WHERE task.type = 'object' AND json_extract(task.value, '$.{BoardTask.WorkflowKey}.{WorkflowRecord.StateKey}') = '{WorkflowStates.Blocked}'
         )
-        SELECT grain_key, task_id, json_extract(task, '$.{BoardTask.OwnerKey}'), json_extract(task, '$.{BoardTask.HumanSinceKey}'), json_extract(task, '$.{BoardTask.HoldSinceKey}'), json_extract(task, '$.{BoardTask.UpdatedAtKey}'), blockers
+        SELECT grain_key, task_id, json_extract(task, '$.{BoardTask.OwnerKey}'), json_extract(task, '$.{BoardTask.HumanSinceKey}'), json_extract(task, '$.{BoardTask.HoldSinceKey}'), json_extract(task, '$.{BoardTask.UpdatedAtKey}'), blockers,
+            coalesce(json_extract(task, '$.{BoardTask.VersionKey}'), 0), json_extract(task, '$.{BoardTask.HumanAnswersKey}')
         FROM tasks
         WHERE EXISTS (SELECT 1 FROM json_each(blockers) AS blocker WHERE {BlockerKind} IN ('{BlockerKinds.HumanDecision}', '{BlockerKinds.CoordinatorHold}'))
         ORDER BY NOT EXISTS (SELECT 1 FROM json_each(blockers) AS blocker WHERE {BlockerKind} = '{BlockerKinds.HumanDecision}'), coalesce(json_extract(task, '$.{BoardTask.HumanSinceKey}'), json_extract(task, '$.{BoardTask.HoldSinceKey}'), json_extract(task, '$.{BoardTask.UpdatedAtKey}')), grain_key, task_id
@@ -225,7 +226,7 @@ public sealed partial class SqliteStore
         return labels;
     }
 
-    private sealed record BlockerRow(string BoardKey, string TaskId, string? Owner, string? HumanSince, string? HoldSince, string? UpdatedAt, string Blockers);
+    private sealed record BlockerRow(string BoardKey, string TaskId, string? Owner, string? HumanSince, string? HoldSince, string? UpdatedAt, string Blockers, long Version, string? Answers);
 
     /// <summary>Copies the blocked tasks of the boards under <paramref name="prefix"/>, empty for every repository, up to one past the read's limit.</summary>
     private void CopyWaitingBlockers(string prefix, List<BlockerRow> rows)
@@ -235,7 +236,7 @@ public sealed partial class SqliteStore
         command.Parameters.AddWithValue("$limit", MaximumWaitingBlockers + 1);
         using var reader = command.ExecuteReader();
         string? Optional(int column) => reader.IsDBNull(column) ? null : reader.GetString(column);
-        while (reader.Read()) rows.Add(new(reader.GetString(0), reader.GetString(1), Optional(2), Optional(3), Optional(4), Optional(5), reader.GetString(6)));
+        while (reader.Read()) rows.Add(new(reader.GetString(0), reader.GetString(1), Optional(2), Optional(3), Optional(4), Optional(5), reader.GetString(6), reader.GetInt64(7), Optional(8)));
     }
 
     /// <summary>The rows that count; a row whose blockers cannot be read is left out, and <paramref name="skipped"/> says so.</summary>
@@ -247,7 +248,7 @@ public sealed partial class SqliteStore
         {
             try
             {
-                if (WaitingList.Blocker(row.BoardKey, row.TaskId, row.Owner, row.HumanSince, row.HoldSince, row.UpdatedAt, row.Blockers) is { } blocker) blockers.Add(blocker);
+                if (WaitingList.Blocker(row.BoardKey, row.TaskId, row.Owner, row.HumanSince, row.HoldSince, row.UpdatedAt, row.Blockers, row.Version, row.Answers) is { } blocker) blockers.Add(blocker);
             }
             catch (JsonException) { skipped = true; }
         }

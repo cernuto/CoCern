@@ -3,6 +3,7 @@ using System.Text.Encodings.Web;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using CoCern.Adapter.Node;
+using CoCern.Contracts;
 
 namespace CoCern.Adapter.Setup;
 
@@ -590,6 +591,18 @@ internal static class ClientSettings
     /// </summary>
     public static ClientPlan PlanPromptHook(string path, string command) => PlanHooks(path, PromptHook(command));
 
+    internal static ClientPlan PlanCodexTurnHooks(string path, string command, string? promptCommand = null)
+    {
+        var specs = TurnHooks(command, codex: true).ToList();
+        if (promptCommand is not null) specs.Add(PromptHook(promptCommand));
+        try { return PlanHooks(path, specs.ToArray()); }
+        catch (ClientSettingsException) when (promptCommand is null)
+        {
+            // Optional telemetry must not prevent a standard connection with an unfamiliar hooks file.
+            return ClientPlan.Unchanged(path);
+        }
+    }
+
     /// <summary>
     /// Adds the CoCern Stop hook to Claude Code's settings.json: when a turn ends it waits on the chat's inbox in the background and, with
     /// <c>asyncRewake</c>, wakes the idle chat when the hub queues a wake. Every other hook is kept; an older CoCern Stop handler (another
@@ -605,13 +618,18 @@ internal static class ClientSettings
     /// </summary>
     internal static ClientPlan PlanConnectStopHook(string settingsPath, string claudeJsonPath, string dotnetPath, string adapterDll)
     {
-        string Command(string adapter) => SetupEnvironment.AdapterCommandLine(dotnetPath, adapter) + " --stop-hook";
-        if (DevelopmentRoot(claudeJsonPath) is not { } root) return PlanStopHook(settingsPath, Command(adapterDll));
+        ClientPlan Hooks(string adapter, bool replaceStop)
+        {
+            var command = SetupEnvironment.AdapterCommandLine(dotnetPath, adapter);
+            return PlanHooks(settingsPath, [StopHook(command + " --stop-hook") with { ReplaceOwned = replaceStop },
+                .. TurnHooks(command + " --turn-hook " + ChatProviders.Claude + " --local", codex: false)]);
+        }
+        if (DevelopmentRoot(claudeJsonPath) is not { } root) return Hooks(adapterDll, true);
         if (!Path.IsPathFullyQualified(root)) return ClientPlan.Unchanged(settingsPath);
         string deployed;
         try { deployed = Development.AdapterDeployment.AdapterPath(root, Development.AdapterDeployment.Read(root)); }
         catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or ArgumentException) { return ClientPlan.Unchanged(settingsPath); }
-        return PlanHooks(settingsPath, StopHook(Command(deployed)) with { ReplaceOwned = false });
+        return Hooks(deployed, false);
     }
 
     /// <summary>The deployment folder a <c>cocern</c> entry's <c>--dev-launch</c> names; null when the entry is missing or is not a development launcher.</summary>
@@ -623,13 +641,22 @@ internal static class ClientSettings
     }
 
     /// <summary>Claude Code's settings.json with the Stop hook and, when asked, the prompt, post-tool and waiting hooks: one plan, so no write loses another.</summary>
-    public static ClientPlan PlanClaudeHooks(string path, string stopCommand, string? promptCommand, string? postToolCommand = null, string? waitingCommand = null)
+    public static ClientPlan PlanClaudeHooks(string path, string stopCommand, string? promptCommand, string? postToolCommand = null, string? waitingCommand = null, string? turnCommand = null)
     {
         var specs = new List<HookSpec> { StopHook(stopCommand) };
         if (promptCommand is not null) specs.Add(PromptHook(promptCommand));
         if (postToolCommand is not null) specs.Add(PostToolHook(postToolCommand));
         if (waitingCommand is not null) specs.AddRange(WaitingHooks(waitingCommand));
+        if (turnCommand is not null) specs.AddRange(TurnHooks(turnCommand, codex: false));
         return PlanHooks(path, specs.ToArray());
+    }
+
+    private static IEnumerable<HookSpec> TurnHooks(string command, bool codex)
+    {
+        string[] events = codex ? ["UserPromptSubmit", "Stop", "Interrupt"] : ["UserPromptSubmit", "Stop"];
+        foreach (var name in events)
+            yield return new(name, "--turn-hook", new JsonObject { ["type"] = "command", ["command"] = command, ["timeout"] = WaitingHookTimeoutSeconds },
+                ReplaceOwned: true, AdapterOnly: true);
     }
 
     /// <summary>
@@ -694,6 +721,7 @@ internal static class ClientSettings
     /// <summary>Applies one handler to <paramref name="root"/>; true when that changed it.</summary>
     private static bool ApplyHook(string path, JsonObject root, HookSpec spec)
     {
+        if (spec.Marker == "--turn-hook" && NativeActivation.HooksDisabled(root)) return false;
         if (root["hooks"] is { } hooksNode && hooksNode is not JsonObject) throw Malformed(path, "'hooks' is not an object");
         var hooks = root["hooks"] as JsonObject ?? (JsonObject)(root["hooks"] = new JsonObject());
         if (hooks[spec.Event] is { } eventNode && eventNode is not JsonArray) throw Malformed(path, $"'hooks.{spec.Event}' is not an array");
@@ -701,6 +729,7 @@ internal static class ClientSettings
         var owned = groups.OfType<JsonObject>().Select(entry => entry["hooks"] as JsonArray).OfType<JsonArray>()
             .SelectMany(list => list.OfType<JsonObject>().Where(entry => JsonText(entry["command"]) is { } text && spec.Owns(text)).Select(entry => (List: list, Entry: entry)))
             .ToArray();
+        if (spec.Marker == "--turn-hook" && owned.Any(item => NativeActivation.HooksDisabled(item.Entry))) return false;
         if (owned.Length == 0)
         {
             var group = new JsonObject();

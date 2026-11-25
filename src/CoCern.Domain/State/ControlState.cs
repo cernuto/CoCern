@@ -137,7 +137,7 @@ public sealed class ControlState(JsonObject json)
         var id = Text(join, "sessionId");
         var matches = Entries().Where(row => row.Entry?.NativeId == participantId && row.Entry.RepositoryId == repositoryId).Take(2).ToArray();
         return matches.Length == 1 && matches[0].Id == id && matches[0].Entry!.NativeGeneration == Text(join, "generation")
-            && !NativeClosing(participantId) ? new(participantId, id, repositoryId) : null;
+            && !NativeClosing(participantId) ? new(participantId, id, repositoryId) { Client = NativeClient(participantId) } : null;
     }
 
     internal VerifiedNativeParticipant? CurrentNativeActor(RelayCaller caller, string participantId, string repositoryId, string sessionId, string token)

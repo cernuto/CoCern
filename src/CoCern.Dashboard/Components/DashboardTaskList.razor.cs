@@ -11,8 +11,31 @@ public partial class DashboardTaskList : ComponentBase, IAsyncDisposable
     [Inject] private NavigationManager Navigation { get; set; } = null!;
     [Parameter, EditorRequired] public string Repository { get; set; } = "";
     [Parameter, EditorRequired] public string Board { get; set; } = "";
+    [Parameter] public DashboardSession[] Sessions { get; set; } = [];
+    private readonly Dictionary<string, string> sessionLabels = new(StringComparer.Ordinal);
+
+    protected override void OnParametersSet()
+    {
+        sessionLabels.Clear();
+        foreach (var session in Sessions.Where(session => session.RepositoryId == Repository && !string.IsNullOrWhiteSpace(session.Label)))
+            sessionLabels[session.SessionId] = session.Label;
+    }
+
+    private string SessionLabel(string? id) => string.IsNullOrEmpty(id) ? "Unknown" : sessionLabels.GetValueOrDefault(id, id);
     private readonly CancellationTokenSource lifetime = new();
     private readonly SortedDictionary<string, DashboardBoardRow> rows = new(StringComparer.Ordinal);
+    private string? expandedTask;
+    private HubConnection? connection;
+
+    private void ToggleTask(string taskId) => expandedTask = expandedTask == taskId ? null : taskId;
+
+    private string NextActor(DashboardBoardRow row)
+    {
+        if (row.BlockerKind == "human_decision") return "Paul";
+        if (row.WorkflowState is "completed" or "blocked") return "—";
+        if (row.LeaseUntil is { } until && until > sampledAt + sampleAge.Elapsed && !string.IsNullOrEmpty(row.Owner)) return SessionLabel(row.Owner);
+        return string.IsNullOrWhiteSpace(row.NextActor) ? "—" : SessionLabel(row.NextActor);
+    }
     private string? notice = "Loading board…";
     private string? instance;
     private long revision;
@@ -24,9 +47,9 @@ public partial class DashboardTaskList : ComponentBase, IAsyncDisposable
     private string ClaimLabel(DashboardBoardRow row)
     {
         if (string.IsNullOrEmpty(row.Owner)) return "Unassigned";
-        if (row.LeaseUntil is { } until ? until > sampledAt + sampleAge.Elapsed : row.LeaseActive) return row.Owner;
+        if (row.LeaseUntil is { } until ? until > sampledAt + sampleAge.Elapsed : row.LeaseActive) return SessionLabel(row.Owner);
         return row.UnresolvedActions == true
-            ? $"Lease expired · {row.Owner} · actions pending" : $"Lease expired · {row.Owner}";
+            ? $"Lease expired · {SessionLabel(row.Owner)} · actions pending" : $"Lease expired · {SessionLabel(row.Owner)}";
     }
 
     protected override void OnAfterRender(bool firstRender)
@@ -62,6 +85,7 @@ public partial class DashboardTaskList : ComponentBase, IAsyncDisposable
                     await hub.StartAsync(token);
                     // Subscribe before the initial read. A change arriving during paging remains queued for the next reconciliation.
                     var connectedInstance = await hub.InvokeAsync<string>("WatchBoard", Repository, Board, token);
+                    connection = hub;
                     if (instance != connectedInstance)
                     {
                         revision = 0;

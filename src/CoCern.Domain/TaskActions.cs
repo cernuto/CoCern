@@ -197,6 +197,8 @@ internal static class TaskActions
         var session = context.SessionId;
         var id = Required(update, "actionId");
         if (ByteSize(update) > RelayLimits.MaxReportBytes) return Error(PayloadTooLarge);
+        if (update.ContainsKey("review") && !TaskDashboardSummary.ValidReview(update["review"]))
+            return Error(InvalidArguments, new { field = "review" });
         if (task.Action(id) is not { } currentAction) return Error(ActionUnknown);
         if (!update.ContainsKey("attempt") || Number(update, "attempt") < 1) return Error(AttemptRequired);
         var attempt = Number(update, "attempt");
@@ -230,6 +232,14 @@ internal static class TaskActions
         if (history.Count >= MaxHistory && !settling) return Error(CapacityExceeded);
         while (history.Count >= MaxHistory) history.RemoveAt(0);
         var entry = TaskReport.Create(id, attempt, outcome, restoration, update["report"]?.DeepClone(), context.Now, caller.PrincipalId, session);
+        if (update["review"] is JsonObject review)
+        {
+            entry.Json["review"] = new JsonObject
+            {
+                ["commit"] = review["commit"]!.DeepClone(), ["branch"] = review["branch"]!.DeepClone(),
+                ["pullRequest"] = review["pullRequest"]?.DeepClone(), ["conclusion"] = review["conclusion"]!.DeepClone()
+            };
+        }
         if (recovery) entry.Recovered = true;
         if (overriding && IsTerminal(outcome)) entry.Overrode = Abandoned;
         if (historical)
@@ -298,5 +308,5 @@ internal static class TaskActions
     }
 
     /// <summary>Whether a request also changes shared task content, which administrative cleanup paths may not do.</summary>
-    public static bool CarriesMilestone(JsonObject args) => args.ContainsKey("patch") || args.ContainsKey("notes") || args.ContainsKey("message");
+    public static bool CarriesMilestone(JsonObject args) => args.ContainsKey("patch") || args.ContainsKey("notes") || args.ContainsKey("message") || args.ContainsKey("parentTaskId") || args.ContainsKey("review");
 }

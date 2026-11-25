@@ -23,6 +23,7 @@
             }
         </div>
         <dl class="session-facts">
+            <div><dt>Client turn</dt><dd title="@DashboardFormat.Timestamp(Session.TurnObservedAt)">@TurnObservation</dd></div>
             <div><dt>Machine</dt><dd>@MachineLabel</dd></div>
             <div><dt>Repository</dt><dd>@(string.IsNullOrWhiteSpace(Session.RepositoryId) ? "Not reported" : Session.RepositoryId)</dd></div>
             <div><dt title="Whether discovery reported a provider mapping for this chat's direct route.">Chat route mapping</dt><dd>@(Session.IsMapped ? "Reported" : "Not reported")</dd></div>
@@ -55,6 +56,9 @@
     private static string ShortId(string id) => id[..Math.Min(8, id.Length)];
     private string ProviderInitial => string.IsNullOrWhiteSpace(Session?.Provider) ? "S" : Session.Provider[..1].ToUpperInvariant();
     private string MachineLabel => Session is null ? "" : DashboardFormat.Machine(Session);
+    private string TurnObservation => Session?.TurnObservedAt is { } at
+        ? $"{Session.TurnLabel(Now)} · observed {DashboardFormat.Ago(at, Now)}"
+        : "Turn unknown";
     private DashboardLogEntry[] SessionLogEntries => Logs.Where(entry => entry.SessionId == Session?.SessionId).OrderByDescending(entry => entry.Sequence).Take(4).ToArray();
 }
 

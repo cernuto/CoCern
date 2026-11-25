@@ -39,6 +39,8 @@ public sealed class SessionState(JsonObject json)
     public const string WorkKey = "work";
     public const string WorkReportedKey = "workReported";
     public const string WaitingForKey = "waitingFor";
+    public const string TurnPhaseKey = "turnPhase";
+    public const string TurnObservedAtKey = "turnObservedAt";
     public const string EventWaitsKey = "eventWaits";
     public const string EventWaitOwnerWatchesKey = "eventWaitOwnerWatches";
     public const string EventWaitOwnerClosureOutcomeKey = "eventWaitOwnerClosureOutcome";
@@ -55,6 +57,7 @@ public sealed class SessionState(JsonObject json)
         (InboxKey, StateShape.Map(StateShape.Object(InboxMessage.Keys.Select(key => (key, (StateShape?)null)).ToArray()))), (AckedKey, StateShape.Map(null)),
         (StandingSeenKey, StateShape.Map(null)), (TargetBoardsKey, StateShape.Map(BoardWatches.EntryShape)), (WorkBoardsKey, StateShape.Map(BoardWatches.EntryShape)),
         (WorkKey, WorkLedger.Shape), (WorkReportedKey, WorkReport.Shape), (WaitingForKey, WaitingMark.Shape),
+        (TurnPhaseKey, null), (TurnObservedAtKey, null),
         (EventWaitsKey, StateShape.Map(StateShape.Any)), (EventWaitOwnerWatchesKey, StateShape.Map(StateShape.Any)),
         (EventWaitOwnerClosureOutcomeKey, null), (EventWaitRetirement.Key, StateShape.Map(null)),
         (PeerReplyWaits.Key, StateShape.Map(StateShape.Any)), (PeerReplyWaits.SequenceKey, null),
@@ -65,7 +68,7 @@ public sealed class SessionState(JsonObject json)
     private static readonly string[] ForgottenOnClose =
     [
         SessionTokenKey, InboxKey, AckedKey, AttentionQueue.ItemsKey, AttentionQueue.ClosedKey, AttentionQueue.ArchivedKey, AttentionQueue.RecentKey, StandingSeenKey,
-        BindingKey, TargetBoardsKey, WorkBoardsKey, WaitingForKey, EventWaitsKey, PeerReplyWaits.Key, PeerReplyWaits.SequenceKey, PeerReplyWaits.ArmsKey
+        BindingKey, TargetBoardsKey, WorkBoardsKey, WaitingForKey, TurnPhaseKey, TurnObservedAtKey, EventWaitsKey, PeerReplyWaits.Key, PeerReplyWaits.SequenceKey, PeerReplyWaits.ArmsKey
     ];
 
     /// <summary>Whether a <see cref="SessionOpen"/> ever initialized this session.</summary>
@@ -250,6 +253,15 @@ public sealed class SessionState(JsonObject json)
     }
 
     public void ClearWaitingFor() => json.Remove(WaitingForKey);
+
+    public void ObserveTurn(string phase, DateTimeOffset observedAt)
+    {
+        // A slow hook may arrive after the next transition. A terminal event wins an exact timestamp tie.
+        var previous = OptionalDate(json, TurnObservedAtKey);
+        if (previous > observedAt || (previous == observedAt && phase == "working")) return;
+        json[TurnPhaseKey] = phase;
+        json[TurnObservedAtKey] = observedAt.ToUniversalTime().ToString("O");
+    }
 }
 
 /// <summary>

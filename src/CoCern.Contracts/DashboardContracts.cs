@@ -100,6 +100,8 @@ public sealed record DashboardWaiting
 /// </summary>
 public sealed record DashboardWaitingItem
 {
+    public long TaskVersion { get; init; }
+    public DashboardHumanDecision[] Decisions { get; init; } = [];
     /// <summary>One of <see cref="DashboardWaitingKinds"/>.</summary>
     public string Kind { get; init; } = "";
     public string RepositoryId { get; init; } = "";
@@ -120,6 +122,10 @@ public sealed record DashboardWaitingItem
     /// <summary>When the row leaves the list by itself. Null for a proposal, which waits until it is decided, and for an unresponsive chat, which leaves when its state does.</summary>
     public DateTimeOffset? ExpiresAt { get; init; }
 }
+
+public sealed record DashboardHumanDecision(string BlockerId, string Question, string RecheckCondition, string[] Options, string RecommendedOption, string? Answer);
+public sealed record DashboardHumanAnswer(string RepositoryId, string BoardId, string TaskId, long TaskVersion, string BlockerId, string Option, string RequestId);
+public sealed record DashboardHumanAnswerResult(bool Ok, string Code);
 
 public sealed record DashboardDocCache
 {
@@ -314,6 +320,12 @@ public sealed record DashboardSession
     public int? UnreadMessages { get; init; }
     public int? PendingEffects { get; init; }
     public DateTimeOffset? LastActivityAt { get; init; }
+    public string? TurnPhase { get; init; }
+    public DateTimeOffset? TurnObservedAt { get; init; }
+
+    public string TurnLabel(DateTimeOffset now) =>
+        IncarnationMismatch || TurnObservedAt is not { } at || at < now.AddMinutes(-15) ? "Turn unknown" :
+        TurnPhase switch { "working" => "Turn in progress", "finished" => "Turn finished", "interrupted" => "Turn interrupted", _ => "Turn unknown" };
     /// <summary>Earliest retained successful foreground MCP call with a verified existing session in its repository.</summary>
     public DateTimeOffset? FirstMcpCallAt { get; init; }
     /// <summary>Expiry of the direct chat route's node announcement, independent of IDE binding freshness.</summary>

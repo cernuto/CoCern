@@ -76,6 +76,7 @@ public static class GoalOrderDelivery
         if (Current(context) is not { } actor) { Failed(context, "goal offer target is not a current verified native session"); return Ok(new { queued = false }); }
         var payload = context.Args.DeepClone().AsObject();
         payload["verifiedParticipant"] = actor.ParticipantId;
+        payload["verifiedClient"] = actor.Client;
         context.Emit(AggregateKinds.Board, Text(payload, "boardKey"), BoardOperation, payload);
         return Ok(new { queued = true });
     }
@@ -91,7 +92,7 @@ public static class GoalOrderDelivery
         var taskId = Text(args, "taskId");
         if (!order.Steps.Any(step => step.Do == OrderActions.Offer && step.TaskId == taskId && step.SessionId == session) || board.Task(taskId) is not { } task) return Ok(new { queued = false });
         var participant = Text(args, "verifiedParticipant");
-        var actor = participant.Length == 0 ? null : new VerifiedNativeParticipant(participant, session, context.Repository);
+        var actor = participant.Length == 0 ? null : new VerifiedNativeParticipant(participant, session, context.Repository) { Client = Text(args, "verifiedClient") };
         if (TaskWorkflow.OfferProblem(board, task, session, context.Now, actor) is { } problem)
         {
             return FailOnBoard(context, "goal offer refused: " + problem);

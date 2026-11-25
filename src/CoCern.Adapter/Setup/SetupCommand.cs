@@ -249,8 +249,8 @@ internal static class SetupCommand
             var promptHook = options.PromptHook ? Hook("--prompt-hook") : null;
             var postToolHook = options.PromptHook ? Hook("--post-tool-hook") : null;
             var waitingHook = options.PromptHook ? Hook("--waiting-hook") : null;
-            planners.Add((() => ClientSettings.PlanClaudeHooks(Path.Combine(env.Profile, ".claude", "settings.json"), Hook("--stop-hook"), promptHook, postToolHook, waitingHook), false));
-            if (promptHook is not null) planners.Add((() => ClientSettings.PlanPromptHook(Path.Combine(env.Profile, ".codex", "hooks.json"), promptHook), false));
+            planners.Add((() => ClientSettings.PlanClaudeHooks(Path.Combine(env.Profile, ".claude", "settings.json"), Hook("--stop-hook"), promptHook, postToolHook, waitingHook, Hook("--turn-hook claude")), false));
+            planners.Add((() => ClientSettings.PlanCodexTurnHooks(Path.Combine(CodexNativeSetup.Profile(env.Profile), "hooks.json"), Hook("--turn-hook codex"), promptHook), false));
         }
         try { foreach (var (planner, claudeCode) in planners) if (!claudeCode || env.ClaudeCli is null) planner(); }
         catch (ClientSettingsException exception) { env.Error.WriteLine(SecretScrub.Clean(exception.Message)); return MalformedClientFileExitCode; }

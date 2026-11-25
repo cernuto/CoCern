@@ -131,8 +131,11 @@ public sealed class BoardTask(JsonObject json)
     public const string CompletedAtKey = "completedAt";
     public const string UpdatedAtKey = "updatedAt";
     public const string UpdatedByKey = "updatedBy";
+    public const string LastReviewerSessionKey = "lastReviewerSessionId";
+    public const string LastReviewChatKey = "lastReviewChat";
     /// <summary>When the hub saw this task take a <c>human_decision</c> blocker; <see cref="UpdatedAtKey"/> resets on any evidence update, so it cannot say.</summary>
     public const string HumanSinceKey = "humanSince";
+    public const string HumanAnswersKey = "humanAnswers";
     /// <summary>The same for a <c>coordinator_hold</c>, so a hold's age never shortens a later human blocker's time on the list.</summary>
     public const string HoldSinceKey = "holdSince";
     /// <summary>When the task left the board; only the archived copy holds it.</summary>
@@ -146,9 +149,10 @@ public sealed class BoardTask(JsonObject json)
 
     public static StateShape Shape { get; } = StateShape.Object(
         (TaskIdKey, null), (VersionKey, null), (ChangeRevisionKey, null), (OwnerKey, null), (LeaseUntilKey, null), (ClaimGenerationKey, null), (ClaimRequestIdKey, null),
-        (ResourceIdsKey, null), (WorkflowKey, WorkflowRecord.Shape), (ActionsKey, StateShape.Map(TaskAction.Shape)), (AttemptHistoryKey, TaskAction.Shape),
+        (ResourceIdsKey, null), (WorkflowKey, WorkflowRecord.Shape), (HumanAnswersKey, StateShape.Any), (ActionsKey, StateShape.Map(TaskAction.Shape)), (AttemptHistoryKey, TaskAction.Shape),
         (ReportsKey, TaskReport.Shape), (MessagesKey, TaskMessage.Shape), (FactsKey, StateShape.Any), (CompletedAtKey, null), (UpdatedAtKey, null), (UpdatedByKey, null),
-        (HumanSinceKey, null), (HoldSinceKey, null), (ArchivedAtKey, null), ("goalAuthorityRef", null));
+        (HumanSinceKey, null), (HoldSinceKey, null), (ArchivedAtKey, null), ("goalAuthorityRef", null), ("parentTaskId", null),
+        (LastReviewerSessionKey, null), (LastReviewChatKey, null));
 
     /// <summary>A new task: version 0, with no actions, conversation, reports or facts yet.</summary>
     public static BoardTask Create(string taskId) => new(new JsonObject
@@ -225,7 +229,21 @@ public sealed class BoardTask(JsonObject json)
     public WorkflowRecord? Workflow => json[WorkflowKey] is JsonObject workflow ? new(workflow) : null;
 
     /// <summary>Stores a copy of <paramref name="workflow"/>, already validated, as the task's workflow.</summary>
-    public void SetWorkflow(JsonObject workflow) => json[WorkflowKey] = workflow.DeepClone();
+    public void SetWorkflow(JsonObject workflow)
+    {
+        if (json[HumanAnswersKey] is JsonObject answers)
+        {
+            var prior = Workflow?.BlockerList;
+            var current = new WorkflowRecord(workflow).BlockerList;
+            foreach (var id in answers.Select(pair => pair.Key).ToArray())
+            {
+                JsonObject? Find(JsonArray? list) => list?.OfType<JsonObject>().FirstOrDefault(item => Text(item, WorkflowBlocker.IdKey) == id);
+                if (Find(current) is not { } blocker || !JsonNode.DeepEquals(Find(prior), blocker)) answers.Remove(id);
+            }
+            if (answers.Count == 0) json.Remove(HumanAnswersKey);
+        }
+        json[WorkflowKey] = workflow.DeepClone();
+    }
 
     /// <summary>The action records by action ID, created empty when the task has none.</summary>
     public JsonObject Actions => ObjectAt(json, ActionsKey);
@@ -516,7 +534,8 @@ public sealed class TaskReport(JsonObject json)
 
     public static StateShape Shape { get; } = StateShape.Object(
         (ActionIdKey, null), (AttemptKey, null), (OutcomeKey, null), (RestorationKey, null), (ReportKey, StateShape.Any), (AtKey, null), (AuthorKey, null), (SessionIdKey, null),
-        (RecoveredKey, null), (OverrodeKey, null), (HistoricalKey, null));
+        (RecoveredKey, null), (OverrodeKey, null), (HistoricalKey, null),
+        ("review", StateShape.Object(("commit", null), ("branch", null), ("pullRequest", null), ("conclusion", null))));
 
     public static TaskReport Create(string actionId, long attempt, string outcome, string restoration, JsonNode? report, DateTimeOffset at, string author, string sessionId) =>
         new(new JsonObject
@@ -598,12 +617,14 @@ public sealed class WorkflowRecord(JsonObject json)
     public const string BlockersKey = "blockers";
     public const string DependsOnKey = "dependsOn";
     public const string TargetSessionIdKey = "targetSessionId";
+    public const string ReviewAuthorClientKey = "reviewAuthorClient";
+    public string ReviewAuthorClient => Text(json, ReviewAuthorClientKey);
     public const string PriorityKey = "priority";
     public const string RecheckEvidenceRefKey = "recheckEvidenceRef";
 
     public static StateShape Shape { get; } = StateShape.Object(
         (StateKey, null), (PacketKey, WorkflowPacket.Shape), (CriteriaKey, WorkflowCriterion.Shape), (BlockersKey, WorkflowBlocker.Shape), (DependsOnKey, null),
-        (TargetSessionIdKey, null), (PriorityKey, null), (RecheckEvidenceRefKey, null));
+        (TargetSessionIdKey, null), (ReviewAuthorClientKey, null), (PriorityKey, null), (RecheckEvidenceRefKey, null));
 
     public JsonObject Json => json;
 
@@ -687,13 +708,18 @@ public sealed class WorkflowBlocker(JsonObject json)
     public const string KindKey = "kind";
     public const string SummaryKey = "summary";
     public const string RecheckConditionKey = "recheckCondition";
+    public const string OptionsKey = "options";
+    public const string RecommendedOptionKey = "recommendedOption";
 
-    public static StateShape Shape { get; } = StateShape.Object((IdKey, null), (KindKey, null), (SummaryKey, null), (RecheckConditionKey, null));
+    public static StateShape Shape { get; } = StateShape.Object((IdKey, null), (KindKey, null), (SummaryKey, null), (RecheckConditionKey, null), (OptionsKey, null), (RecommendedOptionKey, null));
 
     public string Id => Text(json, IdKey);
     public string Kind => Text(json, KindKey);
     public string Summary => Text(json, SummaryKey);
     public string RecheckCondition => Text(json, RecheckConditionKey);
+    public string RecommendedOption => Text(json, RecommendedOptionKey);
+    public string[] Options => json[OptionsKey] is JsonArray options
+        ? options.OfType<JsonValue>().Select(value => value.TryGetValue<string>(out var label) ? label : "").ToArray() : [];
 }
 
 /// <summary>A shared context note: its ID and version, its content and provenance as the client gave them, and who wrote it when.</summary>
