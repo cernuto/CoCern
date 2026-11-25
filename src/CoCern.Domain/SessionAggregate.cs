@@ -302,17 +302,15 @@ internal static class SessionAggregate
                 deferred.Add(new JsonObject { ["boardId"] = board, ["taskId"] = task, ["messageId"] = message.MessageId });
         }
         if (deferred.Count == 0) return;
-        context.State[PendingAnswerReturnsKey] = deferred;
+        context.State[SessionState.PendingAnswerReturnsKey] = deferred;
         ScheduleAnswerReturns(context);
     }
-
-    private const string PendingAnswerReturnsKey = "pendingHumanAnswerReturns";
 
     // A forced close may clear an entire inbox. Keep only the coordinates needed for the excess
     // answer returns and commit each bounded batch of board notifications with its removal.
     private static RelayReply ReturnUnreadHumanAnswers(AggregateContext context)
     {
-        if (context.State[PendingAnswerReturnsKey] is not JsonArray pending) return Ok(new { });
+        if (context.State[SessionState.PendingAnswerReturnsKey] is not JsonArray pending) return Ok(new { });
         var count = Math.Min(pending.Count, RelayLimits.MaxMessagesReturnedOnClose);
         for (var index = 0; index < count; index++)
         {
@@ -320,7 +318,7 @@ internal static class SessionAggregate
             ReportHumanAnswerFailure(context, Text(item, "boardId"), Text(item, "taskId"), Text(item, "messageId"), "unread");
             pending.RemoveAt(pending.Count - 1);
         }
-        if (pending.Count == 0) context.State.Remove(PendingAnswerReturnsKey);
+        if (pending.Count == 0) context.State.Remove(SessionState.PendingAnswerReturnsKey);
         else ScheduleAnswerReturns(context);
         return Ok(new { });
     }

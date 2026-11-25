@@ -151,6 +151,7 @@ public sealed class BoardTask(JsonObject json)
     public static StateShape Shape { get; } = StateShape.Object(
         (TaskIdKey, null), (VersionKey, null), (ChangeRevisionKey, null), (OwnerKey, null), (LeaseUntilKey, null), (ClaimGenerationKey, null), (ClaimRequestIdKey, null),
         (ResourceIdsKey, null), (WorkflowKey, WorkflowRecord.Shape), (HumanAnswersKey, StateShape.Any), (ActionsKey, StateShape.Map(TaskAction.Shape)), (AttemptHistoryKey, TaskAction.Shape),
+        (HumanAnswerDeliveriesKey, StateShape.Map(StateShape.Object(("messageId", null), ("recipient", null), ("author", null), ("retargeted", null), ("failure", null)))),
         (ReportsKey, TaskReport.Shape), (MessagesKey, TaskMessage.Shape), (FactsKey, StateShape.Any), (CompletedAtKey, null), (UpdatedAtKey, null), (UpdatedByKey, null),
         (HumanSinceKey, null), (HoldSinceKey, null), (ArchivedAtKey, null), ("goalAuthorityRef", null), ("parentTaskId", null),
         (LastReviewerSessionKey, null), (LastReviewChatKey, null));

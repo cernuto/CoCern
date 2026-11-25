@@ -169,6 +169,7 @@ public sealed class WaitingOnYouTests
             task.Version, task.Json[BoardTask.HumanAnswersKey]!.ToJsonString(), task.Json[BoardTask.HumanAnswerDeliveriesKey]!.ToJsonString(), task.Workflow.TargetSessionId);
         var decision = Assert.Single(waiting!.Decisions);
         Assert.Equal("closed", decision.DeliveryFailure);
+        Assert.Empty(BoardTask.Shape.Undeclared(task.Json));
         Assert.Equal(replacement.Id, decision.ResendSessionId);
         var resend = new JsonObject { ["requestId"] = "resend", ["taskId"] = taskId, ["blockerId"] = "layout", ["expectedVersion"] = task.Version, ["expectedOwner"] = original.Id };
         Assert.Equal(RelayErrorCodes.VersionConflict, hub.Board(Operations.ResendHumanAnswer, resend, now, viewer).Code);
@@ -201,7 +202,9 @@ public sealed class WaitingOnYouTests
         Assert.True(close.Ok, close.Code);
         var continuation = Assert.Single(hub.Queued.Where(effect => effect.Operation == Operations.ReturnUnreadHumanAnswers));
         Assert.Equal(RelayLimits.MaxMessagesReturnedOnClose, hub.Queued.Count(effect => effect.Operation == Operations.HumanAnswerDeliveryFailed));
-        Assert.Empty(new SessionState(hub.State(AggregateKinds.Session, chat.Id)).Unread);
+        var closed = hub.State(AggregateKinds.Session, chat.Id);
+        Assert.Empty(new SessionState(closed).Unread);
+        Assert.Empty(SessionState.Shape.Undeclared(closed));
         Assert.True(hub.Deliver(continuation, T0).Ok);
         Assert.True(hub.Deliver(continuation, T0).Ok);
         var returns = hub.Queued.Where(effect => effect.Operation == Operations.HumanAnswerDeliveryFailed).Select(effect => JsonNode.Parse(effect.PayloadJson)!).ToArray();
