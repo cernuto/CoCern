@@ -1,0 +1,65 @@
+@using Microsoft.AspNetCore.SignalR.Client
+@implements IDisposable
+
+@if (Row.Review is { } review)
+{
+    <h3>Source review</h3>
+    <p>@ReviewerLabel reviewed <code>@review.Commit</code> on @review.Branch. @review.Conclusion</p>
+    @if (review.PullRequest is { } number)
+    {
+        @if (comparison?.PullRequestUrl is { } url) { <a href="@url">Pull request #@number</a> }
+        else { <span>Pull request #@number</span> }
+    }
+    @if (comparison?.NewerCommits is { } count)
+    {
+        <p>@(count == 0 ? "Reviewed revision is current on the local branch." : $"{count} newer commit{(count == 1 ? "" : "s")} on the local branch.")</p>
+    }
+    else if (comparisonFinished) { <p>Branch comparison unavailable.</p> }
+}
+<h3>Reports and task messages</h3>
+@foreach (var report in reports) { <pre style="white-space:pre-wrap;overflow-wrap:anywhere">@report</pre> }
+@if (status is not null) { <p role="status">@status</p> }
+@if (!loading && nextCursor is { } next) { <button type="button" @onclick="() => LoadReportsAsync(next)">More reports</button> }
+
+@code {
+    [Parameter, EditorRequired] public DashboardBoardRow Row { get; set; } = null!;
+    [Parameter, EditorRequired] public HubConnection Connection { get; set; } = null!;
+    [Parameter, EditorRequired] public string ReviewerLabel { get; set; } = "";
+    private readonly CancellationTokenSource lifetime = new();
+    private readonly List<string> reports = [];
+    private DashboardRevisionComparison? comparison;
+    private bool comparisonFinished;
+    private bool loading;
+    private int? nextCursor;
+    private string? status;
+
+    protected override Task OnInitializedAsync() => Task.WhenAll(LoadReportsAsync(0), CompareRevisionAsync());
+
+    private async Task CompareRevisionAsync()
+    {
+        if (Row.Review is not { } review) return;
+        try
+        {
+            comparison = await Connection.InvokeAsync<DashboardRevisionComparison>("CompareReview", review.Commit, review.Branch, review.PullRequest, lifetime.Token);
+        }
+        catch (Exception) { comparison = null; }
+        comparisonFinished = true;
+    }
+
+    private async Task LoadReportsAsync(int cursor)
+    {
+        loading = true;
+        status = "Loading reports…";
+        try
+        {
+            var page = await Connection.InvokeAsync<DashboardReportPage>("ReadReports", Row.TaskId, Row.Version, cursor, lifetime.Token);
+            reports.AddRange(page.Reports);
+            nextCursor = page.NextCursor;
+            status = reports.Count == 0 ? "No reports or task messages recorded." : null;
+        }
+        catch (Exception) { status = "Reports unavailable. Reopen the task to retry."; }
+        finally { loading = false; }
+    }
+
+    public void Dispose() { lifetime.Cancel(); lifetime.Dispose(); }
+}

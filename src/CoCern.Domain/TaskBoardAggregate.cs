@@ -99,6 +99,7 @@ internal static class TaskBoardAggregate
             RelayTools.ActionBegin => TaskActions.Begin(context, task),
             RelayTools.ActionReport or RelayTools.TaskUpdate => Update(context, task),
             RelayTools.SendMessage => SendTaskMessage(context, task),
+            Operations.AnswerHumanBlocker => AnswerHumanBlocker(context, task),
             _ => Error(UnknownTool)
         };
     }
@@ -153,6 +154,7 @@ internal static class TaskBoardAggregate
         var items = all.Skip((int)offset).Take(args.ContainsKey("partOffset") ? 1 : limit)
             .Select(x => (JsonNode)(x.Archived
                 ? new JsonObject { ["taskId"] = x.Key, ["archived"] = true, ["changeRevision"] = x.Revision }
+                : Flag(args, "dashboardRows") ? TaskDashboardSummary.Row(board, new BoardTask(tasks[x.Key]!.AsObject()))
                 : Summary(new BoardTask(tasks[x.Key]!.AsObject())))).ToList();
         RelayReply Reply() => Ok(new { items, snapshotRevision = current, nextCursor = offset + items.Count < all.Length ? (long?)(offset + items.Count) : null, truncated = offset + items.Count < all.Length, total = all.Length });
         while (items.Count > 1 && !FitsWire(Reply(), RelayLimits.AggregateReplyBytes)) items.RemoveAt(items.Count - 1);
@@ -204,6 +206,7 @@ internal static class TaskBoardAggregate
         var section = Text(args, "section");
         if (section == "brief") return Brief(args, task);
         if (section == BoardTask.WorkflowKey) return task.Workflow is { } workflow ? Ok(workflow.Json, version) : Error(NotFound);
+        if (section == "dashboardEvidence") return Page(TaskDashboardSummary.Evidence(task), args) with { Version = version };
         if (ListSections.Contains(section)) return Page(task.Section(section).Select(x => x!), args) with { Version = version };
         if (section == BoardTask.ActionsKey) return Page(task.Actions.Select(x => x.Value!), args) with { Version = version };
         if (section == BoardTask.FactsKey)
@@ -240,7 +243,7 @@ internal static class TaskBoardAggregate
             ["sections"] = new JsonArray(sections.Select(section => (JsonNode?)JsonValue.Create(section)).ToArray()),
             ["refs"] = refs, ["detailFetchRequired"] = needed
         };
-        foreach (var key in new[] { BoardTask.UpdatedAtKey, BoardTask.UpdatedByKey, BoardTask.ArchivedAtKey })
+        foreach (var key in new[] { BoardTask.UpdatedAtKey, BoardTask.UpdatedByKey, BoardTask.ArchivedAtKey, "parentTaskId" })
             if (task.Json[key] is { } value) brief[key] = value.DeepClone();
         bool Fits() => FitsWire(Ok(brief, task.Version), maximumBytes);
         bool Include(string key, JsonNode value)
@@ -459,6 +462,13 @@ internal static class TaskBoardAggregate
             if (!packetRecovery || task.LeaseUntil > context.Now) return Error(OwnerConflict);
             if (TaskActions.HasUnresolved(task)) return Error(UnresolvedAction);
         }
+        if (args.ContainsKey("parentTaskId"))
+        {
+            if (context.Operation != RelayTools.TaskUpdate || !TaskDashboardSummary.ValidParent(board, task.TaskId, args["parentTaskId"]))
+                return Error(InvalidArguments, new { field = "parentTaskId" });
+            if (args["parentTaskId"] is null) task.Json.Remove("parentTaskId");
+            else task.Json["parentTaskId"] = args["parentTaskId"]!.DeepClone();
+        }
         var priorStatus = task.Actions.ToDictionary(x => x.Key, x => x.Value is JsonObject action ? new TaskAction(action).Status : "", StringComparer.Ordinal);
         var priorStranded = task.ActionRecords.Where(TaskActions.IsStranded).Select(action => action.ActionId).ToList();
         foreach (var report in reports)
@@ -508,6 +518,14 @@ internal static class TaskBoardAggregate
             if (TaskWorkflow.CheckDependencies(board, task.TaskId, incoming) is { } dependency) return Error(dependency);
             if (incomingRef.StartsWith(StandingPreferences.GrantPrefix, StringComparison.Ordinal) && (board.Json["goalBindings"] as JsonObject)?[incomingRef[StandingPreferences.GrantPrefix.Length..]] is not null) task.Json["goalAuthorityRef"] = incomingRef;
             var completing = incoming.State == "completed" && (task.Workflow is not { } prior || prior.State != "completed");
+            if (completing && incoming.ReviewAuthorClient.Length > 0)
+            {
+                if (task.Owner != context.SessionId || task.LeaseUntil <= context.Now || context.ActingParticipant is not { } reviewer
+                    || !TaskWorkflow.ReviewEligible(task, incoming, context.SessionId, reviewer))
+                    return Error(WorkflowNotReady, new { reason = "independent reviewer must hold the task" });
+                task.Json[BoardTask.LastReviewerSessionKey] = reviewer.SessionId;
+                task.Json[BoardTask.LastReviewChatKey] = TaskWorkflow.ReviewChatKey(task, reviewer);
+            }
             task.SetWorkflow(workflow);
             task.StampWaiting(incoming, context.Now);
             // A newly named target is asked to tell this board when it closes, so the task never waits on a session that is gone.
@@ -550,6 +568,39 @@ internal static class TaskBoardAggregate
         var version = task.Version + 1;
         task.Version = version;
         return Ok(new { messageId = new TaskMessage(task.Messages.Last()!.AsObject()).MessageId }, version);
+    }
+
+    private static RelayReply AnswerHumanBlocker(AggregateContext context, BoardTask task)
+    {
+        if (!ExpectedVersionMatches(context.Args, task.Version)) return VersionConflict(task.Version);
+        var id = Text(context.Args, "blockerId");
+        var option = Text(context.Args, "option");
+        var workflow = task.Workflow;
+        var question = workflow?.BlockerList?.OfType<JsonObject>().FirstOrDefault(item => Text(item, WorkflowBlocker.IdKey) == id);
+        if (workflow?.State != WorkflowStates.Blocked || question is null || !TaskWorkflow.ValidDecisionOptions(question)) return VersionConflict(task.Version);
+        var blocker = new WorkflowBlocker(question);
+        var since = Date(task.Json, BoardTask.HumanSinceKey);
+        if (since == default) since = task.UpdatedAt;
+        // The dashboard names the owner it checked was open. A task that changed hands since needs a fresh look.
+        if (since <= context.Now.AddDays(-RelayLimits.WaitingBlockerDays) || !blocker.Options.Contains(option, StringComparer.Ordinal)
+            || task.Owner.Length == 0 || Text(context.Args, "expectedOwner") is { Length: > 0 } expected && task.Owner != expected
+            || task.Json[BoardTask.HumanAnswersKey]?[id] is not null) return VersionConflict(task.Version);
+        if (task.Messages.Count >= MaxConversation) return Error(CapacityExceeded);
+        var version = task.Version + 1;
+        var text = $"Dashboard answer to {id} ({blocker.Summary}): {option}";
+        var entry = TaskMessage.Create(Guid.NewGuid().ToString("N"), task.TaskId, text, InboxMessage.HumanAnswerKind, null, context.Caller.PrincipalId, "", context.Now, version);
+        if (CheckReadable(entry.Json) is { } unreadable) return unreadable;
+        task.Messages.Add(entry.Json);
+        ObjectAt(task.Json, BoardTask.HumanAnswersKey)[id] = option;
+        task.UpdatedAt = context.Now;
+        task.UpdatedBy = context.Caller.PrincipalId;
+        task.Version = version;
+        context.Send(task.Owner, new MessageDelivery(new InboxMessage
+        {
+            MessageId = entry.MessageId, RepositoryId = context.Repository, Kind = InboxMessage.HumanAnswerKind, TaskId = task.TaskId,
+            BoardId = Text(context.Args, "boardId", "default"), TaskVersion = version, Author = context.Caller.PrincipalId, Text = text, SentAt = context.Now
+        }));
+        return Ok(new { taskId = task.TaskId, messageId = entry.MessageId }, version);
     }
 
     /// <summary>

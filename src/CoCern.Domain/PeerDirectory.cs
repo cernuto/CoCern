@@ -22,7 +22,7 @@ internal static class PeerDirectory
     {
         if (!NativeCurrentQuery.Decode(context.Args).TryGet(out var query, out var malformed)) return Malformed(malformed);
         var current = new ControlState(context.State).CurrentNativeActor(context.Caller, query.ParticipantId, query.RepositoryId, query.SessionId, query.SessionToken);
-        return current is null ? Error(SessionDenied) : Ok(new { participantId = current.ParticipantId, sessionId = current.SessionId, repositoryId = current.RepositoryId });
+        return current is null ? Error(SessionDenied) : Ok(new { participantId = current.ParticipantId, sessionId = current.SessionId, repositoryId = current.RepositoryId, client = current.Client });
     }
 
     public static RelayReply Resolve(AggregateContext context)

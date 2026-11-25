@@ -22,6 +22,14 @@ Acquire the complete task/resource claim before the direct work it covers, and u
 
 For meaningful external action boundaries, follow `action_begin` / `action_report` when exposed. Report the exact returned attempt, observed outcome, evidence and actual restoration. A failed or uncertain action must be reconciled in its original scope before retrying. Keep stable request IDs for uncertain retries and respect expected versions; on conflict, reread and reconcile rather than blindly resubmit.
 
+## Resolve a technical ambiguity
+
+Before raising a `human_decision` blocker for an unresolved technical choice, consult one reachable peer on a different client when collaboration is authorized. Use `peers` to identify the client and `chat_directory` to resolve the recipient. Include the task ID, the alternatives, the specific uncertainty and the relevant evidence. The peer provides advice within the existing scope. Keep the task with its current owner and continue independent work while awaiting the reply.
+
+Record the peer's recommendation and its evidence in a task report. If the evidence resolves the choice within the owner's authority, record the decision and proceed. If the choice still needs Paul, include the alternatives, the owner's recommendation and the outstanding disagreement in the blocker. If no suitable peer is available or responds in time, report that briefly and bring the unresolved question to Paul. Questions about Paul's intent, an approval, or a change in authority go directly to Paul.
+
+For an independent code review, set `workflow.reviewAuthorClient` to the author's native client. After fixes, reopen the same review task, update the revision to inspect, and give a fresh eligible chat the full diff. The reviewer's conclusion should identify the commit it covered.
+
 ## Keep context and messages useful
 
 When continuing work without enough prompt history, discover deliberately saved repository-shared knowledge with `session_context_get` (filter by taskId when known), read a matching contextId manifest, then use `session_context_search` and exact entry/version/part reads for details. MCP resource links provide the same bounded content. Multiple plausible contexts are choices, not permission to pick a new task by recency. Recheck current task scope, controls, claims and source evidence. Save selected findings/decisions and a short handoff with `session_context_put` at significant milestones under its expectedVersion; never save credentials or private transcripts. A new session uses its own connection, not an earlier chat's handle. Acknowledging mail does not delete saved context; forget retained content explicitly.

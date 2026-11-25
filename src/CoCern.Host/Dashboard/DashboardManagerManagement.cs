@@ -6,6 +6,7 @@ using CoCern.Contracts;
 using CoCern.Contracts.Dashboard;
 using CoCern.Core;
 using CoCern.Domain;
+using CoCern.Domain.Messages;
 using Microsoft.AspNetCore.Http;
 
 namespace CoCern.Host.Dashboard;
@@ -79,6 +80,36 @@ public static class DashboardManagerManagement
         if (body.Command == "stop") args["allSessions"] = true;
         var reply = await application.ExecuteAsync(new(principal, true, [body.RepositoryId]), RelayTools.ControlRequest, JsonSerializer.SerializeToElement(args), context.RequestAborted);
         return Project(reply);
+    }
+
+    internal static async Task<IResult> AnswerHumanBlockerAsync(HttpContext context, IGrainFactory grains, RepositoryCatalog repositories)
+    {
+        if (Viewer(context) is not { } principal || !DashboardSecurity.SameOrigin(context)) return Results.StatusCode(403);
+        var (body, failure) = await BodyAsync<DashboardHumanAnswer>(context);
+        if (failure is not null) return failure;
+        if (body is null || !Identity(body.RepositoryId) || !Identity(body.BoardId) || !Identity(body.TaskId) || !Identity(body.BlockerId)
+            || !Identity(body.Option) || !Identity(body.SessionId) || body.TaskVersion < 1 || !Guid.TryParseExact(body.RequestId, "N", out _))
+            return Results.BadRequest(new DashboardHumanAnswerResult(false, RelayErrorCodes.InvalidArguments));
+        if (repositories.Find(body.RepositoryId) is not { } repository) return Results.StatusCode(403);
+        var caller = new RelayCaller(principal, true, [repository], IsInternal: true);
+        // A human blocker outlives its chat, and the board does not hear of an owner that closed. An answer nobody would receive is refused
+        // before it is recorded, since a recorded answer cannot be given again.
+        var open = await grains.GetGrain<IControlGrain>(AggregateKinds.ControlKey).ExecuteAsync(caller, SessionsOpenQuery.Operation,
+            new SessionsOpenQuery(repository, [body.SessionId]).ToJson().ToJsonString());
+        if (!open.Ok) return Results.Json(new DashboardHumanAnswerResult(false, open.Code), statusCode: ToolResults.Status(open));
+        using (var sessions = JsonDocument.Parse(open.DataJson))
+        {
+            if (!sessions.RootElement.TryGetProperty("open", out var ids) || ids.ValueKind != JsonValueKind.Array || ids.GetArrayLength() == 0)
+                return Results.Json(new DashboardHumanAnswerResult(false, RelayErrorCodes.SessionUnknown), statusCode: StatusCodes.Status409Conflict);
+        }
+        var args = new JsonObject
+        {
+            ["repositoryId"] = repository, ["boardId"] = body.BoardId, ["taskId"] = body.TaskId, ["expectedVersion"] = body.TaskVersion,
+            ["blockerId"] = body.BlockerId, ["option"] = body.Option, ["requestId"] = body.RequestId, ["expectedOwner"] = body.SessionId
+        };
+        var board = grains.GetGrain<ITaskBoardGrain>(AggregateKinds.BoardKey(repository, body.BoardId));
+        var reply = await board.ExecuteAsync(caller, Operations.AnswerHumanBlocker, args.ToJsonString());
+        return Results.Json(new DashboardHumanAnswerResult(reply.Ok, reply.Code, reply.Ok ? reply.Version : null), statusCode: ToolResults.Status(reply));
     }
 
     private static string? Viewer(HttpContext context) => DashboardSecurity.SecureTransport(context) && context.User.Identity?.IsAuthenticated == true

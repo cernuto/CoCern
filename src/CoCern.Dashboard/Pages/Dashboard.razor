@@ -117,7 +117,7 @@ else
                 @switch (View)
                 {
                     case "tasks":
-                        <TaskBoardView DefaultRepository="@(snapshot.Sessions.FirstOrDefault(session => !string.IsNullOrWhiteSpace(session.RepositoryId))?.RepositoryId)" />
+                        <TaskBoardView Sessions="@snapshot.Sessions" DefaultRepository="@(snapshot.Sessions.FirstOrDefault(session => !string.IsNullOrWhiteSpace(session.RepositoryId))?.RepositoryId)" />
                         break;
                     case "manager":
                         break;

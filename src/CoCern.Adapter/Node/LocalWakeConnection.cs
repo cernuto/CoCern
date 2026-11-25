@@ -108,7 +108,9 @@ internal sealed class LocalWakeConnection
     /// different sessions with nothing to choose between them are ambiguous, and then nothing is guessed: a waiter on the wrong hub would
     /// wait forever. Giving up here left the chat with no waiter at all, unreachable until a human prompted it (the Manager on 2026-11-06).
     /// </summary>
-    public static string? FindForClaude(string chatId, string? cacheRoot = null)
+    public static string? FindForClaude(string chatId, string? cacheRoot = null) => FindForChat(chatId, ClaudeWaiter.FindHandle, cacheRoot);
+
+    internal static string? FindForChat(string chatId, Func<string, string, SessionHandle?> findHandle, string? cacheRoot = null)
     {
         var root = cacheRoot ?? DefaultRoot;
         if (!ChatLocators.IsUuid(chatId) || !Directory.Exists(root)) return null;
@@ -116,7 +118,7 @@ internal sealed class LocalWakeConnection
         {
             var matches = Directory.EnumerateDirectories(root).Take(128)
                 .Where(folder => Read(folder) is not null)
-                .Select(folder => (Folder: folder, Handle: ClaudeWaiter.FindHandle(folder, chatId)))
+                .Select(folder => (Folder: folder, Handle: findHandle(folder, chatId)))
                 .Where(match => match.Handle is not null)
                 .Select(match => (match.Folder, Handle: match.Handle!, Written: HandleWrittenAt(match.Folder, match.Handle!.SessionId)))
                 .OrderByDescending(match => match.Handle.OpenedAt).ThenByDescending(match => match.Written).ThenBy(match => match.Folder, StringComparer.Ordinal)

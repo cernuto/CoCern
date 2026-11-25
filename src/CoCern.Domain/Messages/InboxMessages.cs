@@ -41,6 +41,7 @@ public sealed record InboxMessage
 
     /// <summary>The kind of a board's notice that a task the session works on or was addressed in changed.</summary>
     public const string TaskChangedKind = "task.changed";
+    public const string HumanAnswerKind = "human_answer";
 
     /// <summary>The message's ID, unique in its recipient's inbox: a second delivery of it is ignored.</summary>
     public required string MessageId { get; init; }

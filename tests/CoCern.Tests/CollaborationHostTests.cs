@@ -34,6 +34,46 @@ public sealed class CollaborationHostTests
     private static object Line(string id, string text) => new { id, text };
 
     [Fact]
+    public async Task External_error_requires_an_owned_session_and_retries_create_only_one_triage_task()
+    {
+        await using var host = new RelayHostFixture();
+        using var client = host.AuthorizedClient();
+        var reporter = Data(await host.Call(client, "session_open", new { repositoryId = "repo", requestId = "error-reporter" }));
+        var recipient = Data(await host.Call(client, "session_open", new { repositoryId = "repo", requestId = "triage-worker" }));
+        var sessionId = reporter.GetProperty("sessionId").GetString();
+        var sessionToken = reporter.GetProperty("sessionToken").GetString();
+        var target = recipient.GetProperty("sessionId").GetString();
+        var incident = new { repositoryId = "repo", sessionId, sessionToken, source = "monitor", eventId = "evt-42",
+            summary = "Timeout during refresh", targetSessionId = target };
+        const string path = CoCern.Host.RelayEndpoints.ErrorEventPath;
+
+        using var denied = await client.PostAsJsonAsync(path, incident with { sessionToken = "different-session-token" });
+        Assert.Equal(HttpStatusCode.Forbidden, denied.StatusCode);
+        using var created = await client.PostAsJsonAsync(path, incident);
+        created.EnsureSuccessStatusCode();
+        var taskId = Data(await created.Content.ReadFromJsonAsync<JsonElement>()).GetProperty("taskId").GetString();
+        using var replay = await client.PostAsJsonAsync(path, incident);
+        replay.EnsureSuccessStatusCode();
+        Assert.Equal(taskId, Data(await replay.Content.ReadFromJsonAsync<JsonElement>()).GetProperty("taskId").GetString());
+        using var conflict = await client.PostAsJsonAsync(path, incident with { summary = "Different event contents" });
+        Assert.Equal(HttpStatusCode.Conflict, conflict.StatusCode);
+
+        var task = Data(await host.Call(client, "task_get", new { repositoryId = "repo", taskId, sessionId, sessionToken }));
+        Assert.Equal(1, task.GetProperty("version").GetInt32());
+        Assert.Equal(incident.summary, Assert.Single(task.GetProperty("messages").EnumerateArray()).GetProperty("text").GetString());
+        Assert.False(task.GetProperty("workflow").TryGetProperty("targetSessionId", out _));
+        // The REST read returns the current inbox. Delivery from the board outbox is asynchronous.
+        var inboxArgs = new { repositoryId = "repo", sessionId = target, sessionToken = recipient.GetProperty("sessionToken").GetString(), attention = false };
+        var inbox = Data(await host.Call(client, "check_inbox", inboxArgs));
+        for (var retry = 0; inbox.GetProperty("items").GetArrayLength() == 0 && retry < 40; retry++)
+        {
+            await Task.Delay(100);
+            inbox = Data(await host.Call(client, "check_inbox", inboxArgs));
+        }
+        Assert.Equal(taskId, Assert.Single(inbox.GetProperty("items").EnumerateArray()).GetProperty("taskId").GetString());
+    }
+
+    [Fact]
     public async Task Standing_writes_need_an_administrator_and_proposals_never_take_effect_unapproved()
     {
         await using var host = StandingHost();

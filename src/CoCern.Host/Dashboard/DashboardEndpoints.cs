@@ -152,6 +152,7 @@ public static class DashboardEndpoints
         api.MapGet("/sessions/tool-settings", DashboardSessionToolSettings.ReadAsync).RequireAuthorization(DashboardSecurity.Policy);
         api.MapPost("/sessions/tool-settings", DashboardSessionToolSettings.SaveAsync).RequireAuthorization(DashboardSecurity.Policy);
         api.MapPost("/standing/decide", DashboardStandingManagement.DecideAsync).RequireAuthorization(DashboardSecurity.Policy);
+        api.MapPost("/waiting/answer", DashboardManagerManagement.AnswerHumanBlockerAsync).RequireAuthorization(DashboardSecurity.Policy);
         api.MapGet("/manager", DashboardManagerManagement.ReadAsync).RequireAuthorization(DashboardSecurity.Policy);
         api.MapPost("/manager/decide", DashboardManagerManagement.DecideAsync).RequireAuthorization(DashboardSecurity.Policy);
         api.MapPost("/dispatch", DashboardManagerManagement.DispatchAsync).RequireAuthorization(DashboardSecurity.Policy);

@@ -10,11 +10,44 @@ else if (rows.Count == 0)
 else
 {
     <table aria-label="@($"Tasks on {Repository} / {Board}")">
-        <thead><tr><th scope="col">Task</th><th scope="col">State</th><th scope="col">Owner</th></tr></thead>
+        <thead><tr><th scope="col">Task</th><th scope="col">Latest update</th><th scope="col">State</th><th scope="col">Next actor</th></tr></thead>
         <tbody>
             @foreach (var row in rows.Values)
             {
-                <tr @key="row.TaskId"><th scope="row">@row.TaskId <small>Version @row.Version</small></th><td>@(row.WorkflowState ?? "Unreported")</td><td>@ClaimLabel(row)</td></tr>
+                <tr @key="row.TaskId">
+                    <th scope="row">
+                        <button type="button" aria-expanded="@(expandedTask == row.TaskId ? "true" : "false")" @onclick="() => ToggleTask(row.TaskId)">@(string.IsNullOrWhiteSpace(row.Title) ? row.TaskId : row.Title)</button>
+                        @if (!string.IsNullOrWhiteSpace(row.Title)) { <small>@row.TaskId</small> }
+                    </th>
+                    <td>
+                        <div>@(row.Milestone ?? row.Blocker ?? "No report yet")</div>
+                        @if (row.UpdatedAt is { } at) { <small>@at.ToLocalTime().ToString("g") · @SessionLabel(row.UpdatedBy)</small> }
+                    </td>
+                    <td>@(row.WorkflowState ?? "Unreported") @if (row.BlockerKind is { } kind) { <small>@kind</small> }</td>
+                    <td>@NextActor(row)</td>
+                </tr>
+                @if (expandedTask == row.TaskId)
+                {
+                    <tr><td colspan="4">
+                        <p>Owner: @ClaimLabel(row) · Version @row.Version</p>
+                        @if (row.Blocker is { Length: > 0 } blocker) { <p>@blocker</p> }
+                        @if (row.ParentTaskId is { } parent) { <p>Delegated from @parent</p> }
+                        @if (rows.Values.Any(child => child.ParentTaskId == row.TaskId))
+                        {
+                            <h3>Assignments</h3>
+                            <ul>
+                                @foreach (var child in rows.Values.Where(item => item.ParentTaskId == row.TaskId))
+                                {
+                                    <li><button type="button" @onclick="() => ToggleTask(child.TaskId)">@(child.Title ?? child.TaskId)</button> · @ClaimLabel(child) · @(child.WorkflowState ?? "Unreported") · @child.UpdatedAt?.ToLocalTime().ToString("g")</li>
+                                }
+                            </ul>
+                        }
+                        @if (connection is { } hub)
+                        {
+                            <DashboardTaskReports @key="(hub, row.TaskId, row.Version)" Row="row" Connection="hub" ReviewerLabel="@SessionLabel(row.Review?.Reviewer)" />
+                        }
+                    </td></tr>
+                }
             }
         </tbody>
     </table>

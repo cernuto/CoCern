@@ -19,7 +19,7 @@ internal sealed class DashboardBoardHub(DashboardBoardNotifier boards, IRelayApp
         var args = new JsonObject
         {
             ["repositoryId"] = repository, ["boardId"] = board, ["sinceRevision"] = sinceRevision,
-            ["cursor"] = cursor, ["limit"] = 24
+            ["cursor"] = cursor, ["limit"] = 24, ["dashboardRows"] = true
         };
         if (snapshotRevision.HasValue) args["snapshotRevision"] = snapshotRevision.Value;
         var reply = await application.ExecuteAsync(caller, RelayTools.TaskGet, JsonSerializer.SerializeToElement(args), Context.ConnectionAborted);
@@ -28,7 +28,6 @@ internal sealed class DashboardBoardHub(DashboardBoardNotifier boards, IRelayApp
         if (!reply.Ok) throw new HubException("Board changes are unavailable.");
         using var data = JsonDocument.Parse(reply.DataJson);
         var page = data.RootElement;
-        // Oversized pieces retain scalar claim/ID fields. Nested workflow and action details may be absent.
         var now = DateTimeOffset.UtcNow;
         var rows = page.GetProperty("items").EnumerateArray().Select(item =>
         {
@@ -38,15 +37,54 @@ internal sealed class DashboardBoardHub(DashboardBoardNotifier boards, IRelayApp
                 item.GetProperty("taskId").GetString()!, item.TryGetProperty("version", out var version) ? version.GetInt64() : 0,
                 item.TryGetProperty("owner", out var owner) ? owner.GetString() : null,
                 leaseUntil > now,
-                item.TryGetProperty("unresolvedActions", out var actions) && actions.ValueKind == JsonValueKind.Array
-                    ? actions.GetArrayLength() > 0 : null,
-                item.TryGetProperty("workflow", out var workflow) && workflow.ValueKind == JsonValueKind.Object
-                    && workflow.TryGetProperty("state", out var state) ? state.GetString() : null,
-                item.TryGetProperty("archived", out var archived) && archived.GetBoolean(), leaseUntil);
+                item.TryGetProperty("pendingActions", out var pending) ? pending.GetBoolean() : null,
+                Scalar(item, "state"), item.TryGetProperty("archived", out var archived) && archived.GetBoolean(), leaseUntil,
+                Scalar(item, "title"), Scalar(item, "milestone"), Scalar(item, "updatedBy"),
+                DateTimeOffset.TryParse(Scalar(item, "updatedAt"), out var updated) ? updated : null,
+                Scalar(item, "blockerKind"), Scalar(item, "blocker"), Scalar(item, "target"), Scalar(item, "parentTaskId"),
+                item.TryGetProperty("review", out var review) && review.ValueKind == JsonValueKind.Object
+                    ? new(Scalar(review, "commit")!, review.TryGetProperty("pullRequest", out var pr) && pr.ValueKind == JsonValueKind.Number ? pr.GetInt32() : null,
+                        Scalar(review, "branch")!, Scalar(review, "reviewer")!, Scalar(review, "conclusion")!) : null);
         }).ToArray();
         boards.AuthorizedScope(Context);
         return new(page.GetProperty("snapshotRevision").GetInt64(),
             page.GetProperty("nextCursor") is { ValueKind: JsonValueKind.Number } next ? next.GetInt32() : null, rows, SampledAt: now);
+    }
+
+    private static string? Scalar(JsonElement value, string key) =>
+        value.TryGetProperty(key, out var field) && field.ValueKind == JsonValueKind.String ? field.GetString() : null;
+
+    public async Task<DashboardReportPage> ReadReports(string taskId, long version, int cursor)
+    {
+        var (repository, board, caller) = boards.AuthorizedScope(Context);
+        var args = JsonSerializer.SerializeToElement(new { repositoryId = repository, boardId = board, taskId, section = "dashboardEvidence", cursor, limit = 4 });
+        var reply = await application.ExecuteAsync(caller, RelayTools.TaskGet, args, Context.ConnectionAborted);
+        if (!reply.Ok || reply.Version != version) throw new HubException("Task changed. Reopen its reports.");
+        using var json = JsonDocument.Parse(reply.DataJson);
+        var page = json.RootElement;
+        var reports = page.GetProperty("items").EnumerateArray().Select(entry =>
+        {
+            var by = Scalar(entry, "author");
+            if (Scalar(entry, "text") is { } message) return $"{by} · {Scalar(entry, "at")}\n{message}";
+            var title = $"{Scalar(entry, "actionId")} · {Scalar(entry, "outcome")} · {by} · {Scalar(entry, "at")}";
+            var body = entry.TryGetProperty("report", out var report) ? report.ToString() : "";
+            if (entry.TryGetProperty("review", out var review) && review.ValueKind == JsonValueKind.Object)
+                title += $"\n{Scalar(review, "branch")} @ {Scalar(review, "commit")} · {Scalar(review, "conclusion")}";
+            return body.Length > 0 ? title + "\n" + body : title;
+        }).ToArray();
+        boards.AuthorizedScope(Context);
+        return new(version, reports, page.TryGetProperty("nextCursor", out var next) && next.ValueKind == JsonValueKind.Number ? next.GetInt32() : null);
+    }
+
+    public async Task<DashboardRevisionComparison> CompareReview(string commit, string branch, int? pullRequest,
+        [Microsoft.AspNetCore.Mvc.FromServices] DocRepositoryRegistry registry, [Microsoft.AspNetCore.Mvc.FromServices] GitCli git)
+    {
+        var (repository, _, _) = boards.AuthorizedScope(Context);
+        if (registry.Find(repository) is not { } repo || !DocGit.IsCommit(commit) || !DocGlob.SafeRef(branch))
+            return new(null, null);
+        var comparison = await DashboardReviewComparison.ReadAsync(repo, git, commit, branch, pullRequest, Context.ConnectionAborted);
+        boards.AuthorizedScope(Context);
+        return comparison;
     }
 
     public override Task OnDisconnectedAsync(Exception? exception)

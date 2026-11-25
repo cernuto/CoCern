@@ -1,3 +1,6 @@
+@using System.Net.Http.Json
+@inject IServiceProvider Services
+
 <section class="waiting-on-you" aria-labelledby="@HeadingId">
     <h2 id="@HeadingId">Waiting on you</h2>
     @if (Waiting.Count == 0 && Waiting.Items.Length == 0)
@@ -26,7 +29,31 @@
                             }
                             else if (!string.IsNullOrEmpty(item.Label)) { <strong>@item.Label</strong> }
                         </div>
-                        <p class="waiting-text">@item.Text</p>
+                        @if (item.Decisions.Length == 0 || item.Decisions[0].Question != item.Text)
+                        {
+                            <p class="waiting-text">@item.Text</p>
+                        }
+                        @foreach (var decision in item.Decisions)
+                        {
+                            <fieldset>
+                                <legend>@decision.Question</legend>
+                                <p>@decision.RecheckCondition</p>
+                                @if ((decision.Answer ?? RecordedOption(item, decision)) is { } answer)
+                                {
+                                    <p>Recorded answer: @answer</p>
+                                }
+                                else
+                                {
+                                    @foreach (var option in decision.Options)
+                                    {
+                                        <button type="button" disabled="@(sending || item.SessionId.Length == 0)" @onclick="() => AnswerAsync(item, decision, option)">
+                                            @option @if (option == decision.RecommendedOption) { <text>(recommended)</text> }
+                                        </button>
+                                    }
+                                    @if (item.SessionId.Length == 0) { <p class="muted">This task needs an owner to receive the answer.</p> }
+                                }
+                            </fieldset>
+                        }
                         <div class="waiting-item-details">
                             @if (!string.IsNullOrEmpty(item.RepositoryId)) { <span>@item.RepositoryId@if (!string.IsNullOrEmpty(item.BoardId)) { <text> / @item.BoardId</text> }</span> }
                             @if (!string.IsNullOrEmpty(item.TaskId)) { <span>Task @item.TaskId</span> }
@@ -39,6 +66,7 @@
         }
     }
     @if (Waiting.Truncated) { <p class="limit-note">This list may be incomplete. @Waiting.Count pending decisions were reported.</p> }
+    @if (answerStatus.Length > 0) { <p role="status">@answerStatus</p> }
 </section>
 @code {
     [Parameter] public DashboardWaiting Waiting { get; set; } = new();
@@ -47,6 +75,60 @@
     [Parameter] public string HeadingId { get; set; } = "waiting-heading";
     [Parameter] public EventCallback<string> OnSelectSession { get; set; }
     [Parameter] public EventCallback OnOpenStanding { get; set; }
+
+    private DashboardHumanAnswer? pending;
+    // Answers recorded from this page, by task and blocker, with the task version each one produced. The list catches up within seconds;
+    // until then these keep an answered decision answered and let a further decision on that task use the version it now has.
+    private readonly Dictionary<(string Repository, string Board, string Task, string Blocker), (string Option, long Version)> recorded = new();
+    private bool sending;
+    private string answerStatus = "";
+
+    private string? RecordedOption(DashboardWaitingItem item, DashboardHumanDecision decision) =>
+        recorded.TryGetValue((item.RepositoryId, item.BoardId, item.TaskId, decision.BlockerId), out var answer) && item.TaskVersion <= answer.Version ? answer.Option : null;
+
+    private long CurrentVersion(DashboardWaitingItem item) => recorded
+        .Where(entry => entry.Key.Repository == item.RepositoryId && entry.Key.Board == item.BoardId && entry.Key.Task == item.TaskId)
+        .Select(entry => entry.Value.Version).Append(item.TaskVersion).Max();
+
+    private async Task AnswerAsync(DashboardWaitingItem item, DashboardHumanDecision decision, string option)
+    {
+        if (sending) return;
+        var request = new DashboardHumanAnswer(item.RepositoryId, item.BoardId, item.TaskId, CurrentVersion(item), decision.BlockerId, option, "", item.SessionId);
+        if (pending is null || pending with { RequestId = "" } != request)
+            pending = request with { RequestId = Guid.NewGuid().ToString("N") };
+        sending = true;
+        try
+        {
+            if (Services.GetService(typeof(HttpClient)) is not HttpClient http)
+            {
+                answerStatus = "The dashboard connection is unavailable.";
+                return;
+            }
+            using var response = await http.PostAsJsonAsync("api/waiting/answer", pending);
+            DashboardHumanAnswerResult? result = null;
+            if (response.StatusCode is System.Net.HttpStatusCode.OK or System.Net.HttpStatusCode.Conflict)
+            {
+                try { result = await response.Content.ReadFromJsonAsync<DashboardHumanAnswerResult>(); }
+                catch (Exception error) when (error is System.Text.Json.JsonException or NotSupportedException) { }
+            }
+            if (response.StatusCode == System.Net.HttpStatusCode.OK)
+                recorded[(item.RepositoryId, item.BoardId, item.TaskId, decision.BlockerId)] = (option, result?.TaskVersion ?? pending.TaskVersion + 1);
+            answerStatus = response.StatusCode switch
+            {
+                System.Net.HttpStatusCode.OK => $"Recorded the answer for {item.TaskId} and queued it for the owning chat.",
+                System.Net.HttpStatusCode.Conflict when result?.Code == CoCern.Contracts.RelayErrorCodes.SessionUnknown =>
+                    $"The chat that owns {item.TaskId} has closed, so the answer was not recorded. Give the task to an open chat, then answer.",
+                System.Net.HttpStatusCode.Conflict => "The task changed. Review the current question before answering.",
+                System.Net.HttpStatusCode.Forbidden or System.Net.HttpStatusCode.Unauthorized => "Sign in again to answer.",
+                _ => "The answer could not be confirmed. Check the task before retrying."
+            };
+        }
+        catch (Exception error) when (error is HttpRequestException or OperationCanceledException)
+        {
+            answerStatus = "The answer could not be confirmed. Retrying the same choice will reuse this request.";
+        }
+        finally { sending = false; }
+    }
 
     private static string KindLabel(string kind) => kind switch
     {

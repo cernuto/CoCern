@@ -11,6 +11,10 @@ namespace CoCern.Domain;
 /// <summary>A task blocked on a person, or by a hold that may be one's, as storage read it. <see cref="Human"/> wins when it has both.</summary>
 public sealed record WaitingBlocker
 {
+    public long TaskVersion { get; init; }
+    public DashboardHumanDecision[] Decisions { get; init; } = [];
+    /// <summary>Every <c>human_decision</c> blocker offers choices and has a recorded answer, so the task now waits on its chat.</summary>
+    public bool Answered { get; init; }
     public string RepositoryId { get; init; } = "";
     public string BoardId { get; init; } = "";
     public string TaskId { get; init; } = "";
@@ -84,12 +88,14 @@ public static class WaitingList
         var blockers = sources.Blockers.Where(blocker => InScope(blocker.RepositoryId) && (blocker.Since is not { } since || since.AddDays(RelayLimits.WaitingBlockerDays) > now))
             .Select(blocker => new
             {
-                blocker.Human,
+                // An answered decision waits on its chat to act, so it is follow-up and leaves the count.
+                Human = blocker.Human && !blocker.Answered,
                 Row = new DashboardWaitingItem
                 {
                     Kind = blocker.Human ? DashboardWaitingKinds.HumanBlocker : DashboardWaitingKinds.CoordinatorHold, RepositoryId = blocker.RepositoryId, BoardId = blocker.BoardId,
                     TaskId = DashboardText.Safe(blocker.TaskId), SessionId = DashboardText.Safe(blocker.OwnerSessionId), Label = Label(blocker.OwnerSessionId), Text = Cut(blocker.Summary),
-                    Since = blocker.Since, ExpiresAt = blocker.Since?.AddDays(RelayLimits.WaitingBlockerDays)
+                    Since = blocker.Since, ExpiresAt = blocker.Since?.AddDays(RelayLimits.WaitingBlockerDays),
+                    TaskVersion = blocker.TaskVersion, Decisions = blocker.TaskId == DashboardText.Safe(blocker.TaskId) ? blocker.Decisions : []
                 }
             }).ToArray();
         var reports = sources.Reports.Where(report => InScope(report.RepositoryId) && report.ExpiresAt > now)
@@ -173,7 +179,8 @@ public static class WaitingList
     /// not count: only each blocker's own <c>kind</c> does. The time falls back to the last update for a task from before the stamps.
     /// </summary>
     /// <exception cref="JsonException">The blockers are not JSON.</exception>
-    public static WaitingBlocker? Blocker(string boardKey, string taskId, string? owner, string? humanSince, string? holdSince, string? updatedAt, string blockersJson)
+    public static WaitingBlocker? Blocker(string boardKey, string taskId, string? owner, string? humanSince, string? holdSince, string? updatedAt, string blockersJson,
+        long taskVersion = 0, string? answersJson = null)
     {
         using var document = JsonDocument.Parse(blockersJson, Options);
         if (document.RootElement.ValueKind != JsonValueKind.Array) return null;
@@ -183,10 +190,26 @@ public static class WaitingList
         var summary = human ?? Summary(BlockerKinds.CoordinatorHold);
         if (summary is null) return null;
         var (repository, board) = BoardReadModels.BoardAddress(boardKey);
+        using var answers = JsonDocument.Parse(answersJson ?? "{}", Options);
+        var decisions = new List<DashboardHumanDecision>();
+        var questions = 0;
+        foreach (var blocker in blockers.Where(blocker => Text(blocker, WorkflowBlocker.KindKey) == BlockerKinds.HumanDecision))
+        {
+            questions++;
+            if (!blocker.TryGetProperty(WorkflowBlocker.OptionsKey, out var options) || options.ValueKind != JsonValueKind.Array) continue;
+            var json = JsonObject.Create(blocker)!;
+            if (!TaskWorkflow.ValidDecisionOptions(json)) continue;
+            var decision = new WorkflowBlocker(json);
+            var answer = answers.RootElement.ValueKind == JsonValueKind.Object && answers.RootElement.TryGetProperty(decision.Id, out var recorded) && recorded.ValueKind == JsonValueKind.String
+                ? DashboardText.Safe(recorded.GetString()!) : null;
+            decisions.Add(new(decision.Id, decision.Summary, decision.RecheckCondition, decision.Options, decision.RecommendedOption, answer));
+        }
         return new()
         {
             RepositoryId = repository, BoardId = board, TaskId = taskId, OwnerSessionId = owner ?? "", Human = human is not null, Summary = summary,
-            Since = Moment(human is not null ? humanSince : holdSince) ?? Moment(updatedAt)
+            Since = Moment(human is not null ? humanSince : holdSince) ?? Moment(updatedAt), TaskVersion = taskVersion, Decisions = decisions.ToArray(),
+            // A question with no choices, or one still open, keeps the task waiting on a person.
+            Answered = questions > 0 && decisions.Count == questions && decisions.All(decision => decision.Answer is not null)
         };
     }
 

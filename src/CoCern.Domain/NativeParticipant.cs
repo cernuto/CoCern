@@ -7,7 +7,10 @@ using CoCern.Contracts;
 namespace CoCern.Domain;
 
 /// <summary>A session identity produced by hub verification, without its credential.</summary>
-public sealed record VerifiedNativeParticipant(string ParticipantId, string SessionId, string RepositoryId);
+public sealed record VerifiedNativeParticipant(string ParticipantId, string SessionId, string RepositoryId)
+{
+    public string Client { get; init; } = "";
+}
 
 /// <summary>A current native join's authenticated machine and adapter-proven checkout. Consumers must revalidate at file use.</summary>
 /// <param name="PreviousRoots">

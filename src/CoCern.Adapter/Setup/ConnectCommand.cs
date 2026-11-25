@@ -119,7 +119,9 @@ internal static class ConnectCommand
                     !ClientSettings.IsStandardCodexLaunchAvailable(Path.Combine(codexProfile, "config.toml"));
                 var hook = client.Id == ConnectClients.ClaudeCode && (!plan.IsUnchanged || owned.Contains(client.Id))
                     ? ClientSettings.PlanConnectStopHook(Path.Combine(profile, ".claude", "settings.json"), Path.Combine(profile, ".claude.json"), dotnetPath, adapterDll)
-                    : null;
+                    : client.Id == ConnectClients.Codex && (!plan.IsUnchanged || owned.Contains(client.Id))
+                        ? ClientSettings.PlanCodexTurnHooks(Path.Combine(codexProfile, "hooks.json"), SetupEnvironment.AdapterCommandLine(dotnetPath, adapterDll) + " --turn-hook codex --local")
+                        : null;
                 // An entry that is not this hub's is never changed, so its plan is always unchanged: it is checked first, or it would read as connected.
                 var state = foreign.ContainsKey(client.Id) ? ConnectStates.OtherHub : plan.IsUnchanged ? ConnectStates.Connected : plan.Refreshes ? check ? ConnectStates.Outdated : ConnectStates.Updated : check ? ConnectStates.Available : ConnectStates.Added;
                 if (state == ConnectStates.Connected && launchUnavailable)

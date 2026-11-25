@@ -221,7 +221,7 @@ internal static class NativeActivation
             desired.GetProperty(name).EnumerateArray().All(item => entries.Any(entry => JsonNode.DeepEquals(entry, JsonNode.Parse(item.GetRawText())))));
     }
 
-    private static bool HooksDisabled(JsonObject document)
+    internal static bool HooksDisabled(JsonObject document)
     {
         foreach (var (key, active) in new[] { ("disabled", false), ("enabled", true), ("disableAllHooks", false) })
             if (document[key] is { } value && (value is not JsonValue flag || !flag.TryGetValue<bool>(out var given) || given != active)) return true;

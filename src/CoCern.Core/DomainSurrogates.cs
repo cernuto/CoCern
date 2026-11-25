@@ -15,6 +15,7 @@ public struct RelayCallerSurrogate
     [Id(4)] public string? AuthenticatedMachineId;
     [Id(5)] public string[]? ActingParticipant;
     [Id(6)] public string[][]? GoalParticipants;
+    [Id(7)] public string? ActingClient;
 }
 
 [RegisterConverter]
@@ -22,7 +23,8 @@ public sealed class RelayCallerSurrogateConverter : IConverter<RelayCaller, Rela
 {
     public RelayCaller ConvertFromSurrogate(in RelayCallerSurrogate surrogate) => new(surrogate.PrincipalId, surrogate.IsAdministrator, surrogate.Repositories, surrogate.IsInternal, surrogate.AuthenticatedMachineId)
     {
-        ActingParticipant = surrogate.IsInternal ? Participant(surrogate.ActingParticipant) : null,
+        ActingParticipant = surrogate.IsInternal && Participant(surrogate.ActingParticipant) is { } actor
+            ? actor with { Client = surrogate.ActingClient ?? "" } : null,
         GoalParticipants = surrogate.IsInternal && surrogate.GoalParticipants is { Length: <= 32 } members
             ? members.All(member => Participant(member) is not null) ? members.Select(member => Participant(member)!).ToArray() : null : null
     };
@@ -30,6 +32,7 @@ public sealed class RelayCallerSurrogateConverter : IConverter<RelayCaller, Rela
     {
         PrincipalId = value.PrincipalId, IsAdministrator = value.IsAdministrator, Repositories = value.Repositories, IsInternal = value.IsInternal, AuthenticatedMachineId = value.AuthenticatedMachineId,
         ActingParticipant = value.IsInternal ? Fields(value.ActingParticipant) : null,
+        ActingClient = value.IsInternal ? value.ActingParticipant?.Client : null,
         GoalParticipants = value.IsInternal ? value.GoalParticipants?.Select(member => Fields(member)!).ToArray() : null
     };
 

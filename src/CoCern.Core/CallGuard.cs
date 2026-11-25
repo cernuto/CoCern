@@ -117,7 +117,7 @@ internal sealed class CallGuard(Aggregates aggregates, string incarnation, Func<
                 {
                     var result = Aggregates.Parse(current);
                     if (Text(result, "participantId") == participant && Text(result, "sessionId") == sessionId && Text(result, "repositoryId") == repository)
-                        native = new(participant, sessionId, repository);
+                        native = new(participant, sessionId, repository) { Client = Text(result, "client") };
                 }
             }
             call = call with { Session = direct ? session : null, ActorSession = session, ActingSessionId = sessionId, NativeParticipant = native, Caller = caller with { ActingParticipant = native } };

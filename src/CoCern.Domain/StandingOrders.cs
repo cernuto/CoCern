@@ -257,7 +257,7 @@ internal static class StandingOrders
                 // Each order raise names its order and run; if the session refuses it, the dispatcher reports a failed run.
                 var reference = task.Workflow?.Packet?.AuthorityRef ?? "";
                 var goalId = reference.StartsWith(StandingPreferences.GrantPrefix, StringComparison.Ordinal) ? reference[StandingPreferences.GrantPrefix.Length..] : "";
-                if (Text(task.Json, "goalAuthorityRef").Length > 0 || goalId.Length > 0 && ((board.Json["goalBindings"] as JsonObject)?[goalId] is not null || board.Standing?.Grant(goalId)?.Json["approvedGoal"] is not null || board.Tasks.Any(root => Text(root.Json, "goalAuthorityRef") == reference)))
+                if (task.Workflow!.ReviewAuthorClient.Length > 0 || Text(task.Json, "goalAuthorityRef").Length > 0 || goalId.Length > 0 && ((board.Json["goalBindings"] as JsonObject)?[goalId] is not null || board.Standing?.Grant(goalId)?.Json["approvedGoal"] is not null || board.Tasks.Any(root => Text(root.Json, "goalAuthorityRef") == reference)))
                     GoalOrderDelivery.Queue(context, step.SessionId, item, id, revision);
                 else AttentionSources.Emit(context, step.SessionId, item, id, revision);
                 return null;

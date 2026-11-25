@@ -228,6 +228,7 @@ public static class DueWorkKinds
 /// <summary>Hub-internal operations. They compose public tools across aggregates and are never accepted from clients.</summary>
 public static class Operations
 {
+    public const string AnswerHumanBlocker = "__answer_human_blocker";
     /// <summary>Initializes a session from its record (<see cref="Messages.SessionOpen"/>).</summary>
     public const string Open = "__open";
     /// <summary>The hub checks the session handle a call presents, and reads the session's record (<see cref="Messages.SessionVerify"/>).</summary>

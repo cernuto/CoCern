@@ -349,6 +349,8 @@ public sealed partial class SqliteStore : IRelayObservationSource
             SessionId = id, Label = Text(state, "label"), MachineId = Text(state, "machineId"), RepositoryId = Text(state, "repositoryId"),
             ReportedAt = Date(state, "observedAt"), FreshUntil = Date(state, "freshUntil"),
             OpenedAt = Date(state, "openedAt"),
+            TurnPhase = Text(state, SessionState.TurnPhaseKey),
+            TurnObservedAt = Date(state, SessionState.TurnObservedAtKey),
             BindingVersion = bindingVersion.ValueKind == JsonValueKind.Number && bindingVersion.TryGetInt64(out var version) && version >= 0 ? version : null,
             HasBindingReport = hasBinding ? true : hasVersion ? false : null,
             IncarnationMismatch = RawText(state, "hubIncarnation") != incarnation,

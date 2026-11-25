@@ -75,6 +75,9 @@ internal static class AttentionSources
             foreach (var id in unblocked)
             {
                 if (tasks[id]?["workflow"] is not JsonObject next || Text(next, "targetSessionId") is not { Length: > 0 } target || target == context.SessionId) continue;
+                // A dependency completing proves nothing about the target's client. Reviewers
+                // receive their offer through NextWork or a verified standing order.
+                if (new WorkflowRecord(next).ReviewAuthorClient.Length > 0) continue;
                 Emit(context, target, new AttentionContent
                 {
                     Kind = AttentionKinds.NextWork, TaskId = id, Priority = AttentionWeights.PriorityLevel(Number(next, "priority")), Note = "ready: " + taskId + " completed",
